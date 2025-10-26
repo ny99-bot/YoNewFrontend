@@ -48,7 +48,10 @@ export default function NewTrip() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  // this is the working draft of the trip we're building
+  // local UI helpers
+  const [customRec, setCustomRec] = useState("");
+
+  // working draft of the trip
   const [tripData, setTripData] = useState({
     destination: "",
     start_date: "",
@@ -56,9 +59,13 @@ export default function NewTrip() {
     airline: "",
     travel_class: "Economy",
     purpose: "Vacation",
+    // suitcase size (liters) affects packing strategy
+    suitcaseSizeL: 40, // 40 (carry-on), 60 (medium), 90 (large)
     // items the user is packing
     items: [],
-    // AI results
+    // AI suggestions (toggle-able objects)
+    suggestions: [], // [{id,text,category,reason,selected}]
+    // raw legacy field (kept for compatibility, not used for UI now)
     ai_suggestions: null,
     // weight + airline limit info
     total_weight: 0,
@@ -66,6 +73,7 @@ export default function NewTrip() {
     optimization: null,
     // packing plan
     packing_steps: [],
+    packing_plan: null, // { suitcaseSizeL, orderedPackingList, steps }
   });
 
   // helper to update tripData
@@ -78,7 +86,7 @@ export default function NewTrip() {
   //
   useEffect(() => {
     // Step 3 => get AI suggestions
-    if (currentStep === 3 && !tripData.ai_suggestions && !loading) {
+    if (currentStep === 3 && tripData.suggestions.length === 0 && !loading) {
       fetchAISuggestions();
     }
 
@@ -88,25 +96,21 @@ export default function NewTrip() {
     }
 
     // Step 5 => get packing steps
-    if (
-      currentStep === 5 &&
-      tripData.packing_steps.length === 0 &&
-      !loading
-    ) {
+    if (currentStep === 5 && !tripData.packing_plan && !loading) {
       fetchPackingSteps();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
   //
-  // ====== BACKEND CALLS (YOUR RENDER API) ======
+  // ====== BACKEND CALLS ======
   //
 
   const fetchAISuggestions = async () => {
     setLoading(true);
     setError(null);
     try {
-      const suggestions = await getAiSuggestions({
+      const data = await getAiSuggestions({
         destination: tripData.destination,
         dates: {
           start: tripData.start_date,
@@ -118,16 +122,17 @@ export default function NewTrip() {
         items: tripData.items,
       });
 
-      // suggestions is expected to look like:
-      // { missing: [...], climate: [...], purpose: [...] }
+      // Expect shape: { suggestions: [{id,text,category,reason,selected}] }
+      const suggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
+
       updateTripData({
-        ai_suggestions: suggestions,
+        suggestions,
+        // keep legacy ai_suggestions for backward-compat (not used for UI now)
+        ai_suggestions: data,
       });
     } catch (err) {
       console.error(err);
-      setError(
-        "Failed to get AI suggestions. Please check your backend connection."
-      );
+      setError("Failed to get AI suggestions. Please check your backend connection.");
     } finally {
       setLoading(false);
     }
@@ -157,7 +162,7 @@ export default function NewTrip() {
           items: itemsWithWeights,
           limitKg: tripData.airline_limit,
         });
-        // optimizationResult: { keep, drop, totalG, limitG }
+        // optimizationResult: { keep, drop, totalG, limitG } (keep/drop are items)
       }
 
       updateTripData({
@@ -167,9 +172,7 @@ export default function NewTrip() {
       });
     } catch (err) {
       console.error(err);
-      setError(
-        "Failed to calculate weights. Please check your backend connection."
-      );
+      setError("Failed to calculate weights. Please check your backend connection.");
     } finally {
       setLoading(false);
     }
@@ -179,47 +182,80 @@ export default function NewTrip() {
     setLoading(true);
     setError(null);
     try {
+      // Transform items so backend sees count + aiWeight fields
+      const itemsForPack = (tripData.items || []).map((it) => ({
+        ...it,
+        count: it.quantity ?? it.qty ?? 1,
+        aiWeight: it.weight ?? it.aiWeight ?? 0,
+      }));
+
       const stepsData = await getPackingSteps({
-        items: tripData.items,
-        luggageType: "suitcase", // you can make this dynamic later
+        items: itemsForPack,
+        recommendationsSelected: (tripData.suggestions || []).filter((s) => s.selected),
+        suitcaseSizeL: tripData.suitcaseSizeL || 40,
+        luggageType: "suitcase",
       });
 
-      // stepsData: { steps: [ { title, body }, ... ], luggageType }
+      // Expect shape: { suitcaseSizeL, orderedPackingList, steps }
       updateTripData({
-        packing_steps: stepsData.steps || [],
+        packing_plan: stepsData || null,
+        packing_steps: stepsData?.steps || [],
       });
     } catch (err) {
       console.error(err);
-      setError(
-        "Failed to get packing strategy. Please check your backend connection."
-      );
+      setError("Failed to get packing strategy. Please check your backend connection.");
     } finally {
       setLoading(false);
     }
   };
 
   //
-  // ====== LOCAL ITEM EDITING ======
+  // ====== LOCAL ITEM / SUGGESTION EDITING ======
   //
 
   const addItem = (item) => {
     updateTripData({
       items: [...tripData.items, item],
+      // reset things that depend on items so we can recompute
+      total_weight: 0,
+      optimization: null,
+      packing_plan: null,
+      packing_steps: [],
     });
   };
 
   const removeItem = (index) => {
+    const nextItems = tripData.items.filter((_, i) => i !== index);
     updateTripData({
-      items: tripData.items.filter((_, i) => i !== index),
+      items: nextItems,
+      total_weight: 0,
+      optimization: null,
+      packing_plan: null,
+      packing_steps: [],
     });
   };
 
-  const addSuggestedItem = (itemName) => {
-    addItem({
-      name: itemName,
-      quantity: 1,
-      category: "Other",
+  const toggleSuggestion = (id, selected) => {
+    updateTripData({
+      suggestions: (tripData.suggestions || []).map((s) =>
+        s.id === id ? { ...s, selected } : s
+      ),
+      packing_plan: null,
+      packing_steps: [],
     });
+  };
+
+  const addCustomSuggestion = () => {
+    const text = (customRec || "").trim();
+    if (!text) return;
+    const id = "custom:" + text.toLowerCase().replace(/\s+/g, "-");
+    updateTripData({
+      suggestions: [
+        ...(tripData.suggestions || []),
+        { id, text, category: "custom", reason: "User-added", selected: true },
+      ],
+    });
+    setCustomRec("");
   };
 
   //
@@ -231,11 +267,7 @@ export default function NewTrip() {
 
     // Step 1 validation
     if (currentStep === 1) {
-      if (
-        !tripData.destination ||
-        !tripData.start_date ||
-        !tripData.end_date
-      ) {
+      if (!tripData.destination || !tripData.start_date || !tripData.end_date) {
         setError("Please fill in all required fields");
         return;
       }
@@ -274,8 +306,8 @@ export default function NewTrip() {
     try {
       const uid = getUid(); // comes from apiClient (localStorage fallback)
 
-      // Build a shape the backend can store
-      // You get to define this. Here's a reasonable default:
+      const acceptedRecs = (tripData.suggestions || []).filter((s) => s.selected);
+
       const tripPayload = {
         destination: tripData.destination,
         startDate: tripData.start_date,
@@ -285,22 +317,28 @@ export default function NewTrip() {
         purpose: tripData.purpose,
         status: "completed",
 
-        // optional extras you may want to store:
         airlineLimitKg: tripData.airline_limit,
         totalWeightKg: tripData.total_weight,
-        aiSuggestions: tripData.ai_suggestions,
+
+        suitcaseSizeL: tripData.suitcaseSizeL,
+
+        // store what user accepted from AI
+        acceptedRecommendations: acceptedRecs,
+
+        // pack plan for summary
+        packingPlan: tripData.packing_plan,
         packingSteps: tripData.packing_steps,
+
+        // keep legacy fields if you want to inspect later
+        aiSuggestionsRaw: tripData.ai_suggestions,
         optimization: tripData.optimization,
+
         createdAt: new Date().toISOString(),
       };
 
-      // saveTrip(uid, tripId?, tripData)
-      // - tripId can be null to create a new one
-      // This should return { tripId: "abc123" } (you can implement that in apiClient/server)
       const { tripId } = await saveTrip(uid, null, tripPayload);
 
-      // Then save items in bulk
-      // saveTripItems(uid, tripId, itemsArray)
+      // save items in bulk
       await saveTripItems(uid, tripId, tripData.items);
 
       // After saving, go to summary
@@ -400,9 +438,7 @@ export default function NewTrip() {
                 <Input
                   id="airline"
                   value={tripData.airline}
-                  onChange={(e) =>
-                    updateTripData({ airline: e.target.value })
-                  }
+                  onChange={(e) => updateTripData({ airline: e.target.value })}
                   placeholder="e.g., Delta, United, Emirates"
                   className="mt-1"
                 />
@@ -413,18 +449,14 @@ export default function NewTrip() {
                   <Label>Cabin Class</Label>
                   <Select
                     value={tripData.travel_class}
-                    onValueChange={(value) =>
-                      updateTripData({ travel_class: value })
-                    }
+                    onValueChange={(value) => updateTripData({ travel_class: value })}
                   >
                     <SelectTrigger className="mt-1">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Economy">Economy</SelectItem>
-                      <SelectItem value="Premium Economy">
-                        Premium Economy
-                      </SelectItem>
+                      <SelectItem value="Premium Economy">Premium Economy</SelectItem>
                       <SelectItem value="Business">Business</SelectItem>
                       <SelectItem value="First">First</SelectItem>
                     </SelectContent>
@@ -435,9 +467,7 @@ export default function NewTrip() {
                   <Label>Trip Purpose</Label>
                   <Select
                     value={tripData.purpose}
-                    onValueChange={(value) =>
-                      updateTripData({ purpose: value })
-                    }
+                    onValueChange={(value) => updateTripData({ purpose: value })}
                   >
                     <SelectTrigger className="mt-1">
                       <SelectValue />
@@ -446,29 +476,45 @@ export default function NewTrip() {
                       <SelectItem value="Vacation">Vacation</SelectItem>
                       <SelectItem value="Business">Business</SelectItem>
                       <SelectItem value="Adventure">Adventure</SelectItem>
-                      <SelectItem value="Family Visit">
-                        Family Visit
-                      </SelectItem>
+                      <SelectItem value="Family Visit">Family Visit</SelectItem>
                       <SelectItem value="Other">Other</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
-              <div>
-                <Label htmlFor="airline_limit">Baggage Limit (kg)</Label>
-                <Input
-                  id="airline_limit"
-                  type="number"
-                  value={tripData.airline_limit}
-                  onChange={(e) =>
-                    updateTripData({
-                      airline_limit:
-                        parseFloat(e.target.value) || 23,
-                    })
-                  }
-                  className="mt-1"
-                />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="airline_limit">Baggage Limit (kg)</Label>
+                  <Input
+                    id="airline_limit"
+                    type="number"
+                    value={tripData.airline_limit}
+                    onChange={(e) =>
+                      updateTripData({
+                        airline_limit: parseFloat(e.target.value) || 23,
+                      })
+                    }
+                    className="mt-1"
+                  />
+                </div>
+
+                <div>
+                  <Label>Suitcase Size</Label>
+                  <Select
+                    value={String(tripData.suitcaseSizeL)}
+                    onValueChange={(v) => updateTripData({ suitcaseSizeL: Number(v) })}
+                  >
+                    <SelectTrigger className="mt-1">
+                      <SelectValue placeholder="Choose size" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="40">Carry-on ~40L</SelectItem>
+                      <SelectItem value="60">Medium ~60L</SelectItem>
+                      <SelectItem value="90">Large ~90L</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -483,116 +529,88 @@ export default function NewTrip() {
               <h3 className="text-lg font-semibold mb-4 text-gray-900">
                 Your Packing List
               </h3>
-              <ItemsList
-                items={tripData.items}
-                onRemoveItem={removeItem}
-              />
+              <ItemsList items={tripData.items} onRemoveItem={removeItem} />
             </div>
           </div>
         )}
 
-        {/* STEP 3: AI SUGGESTIONS */}
+        {/* STEP 3: AI SUGGESTIONS (toggle-able + add custom) */}
         {currentStep === 3 && (
           <div className="space-y-6">
             {loading ? (
               <Card className="border-none shadow-lg">
                 <CardContent className="py-16 text-center">
                   <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-                  <p className="text-gray-600">
-                    Getting AI suggestions...
-                  </p>
+                  <p className="text-gray-600">Getting AI suggestions...</p>
                 </CardContent>
               </Card>
-            ) : tripData.ai_suggestions ? (
+            ) : (
               <>
-                {tripData.ai_suggestions.missing?.length > 0 && (
-                  <Card className="border-none shadow-lg">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <Sparkles className="w-5 h-5 text-blue-500" />
-                        You Might Be Missing
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      {tripData.ai_suggestions.missing.map(
-                        (item, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center justify-between p-3 bg-blue-50 rounded-lg"
-                          >
-                            <span className="text-gray-900">
-                              {item}
-                            </span>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() =>
-                                addSuggestedItem(item)
-                              }
-                              className="text-blue-600 hover:text-blue-700"
-                            >
-                              <Plus className="w-4 h-4 mr-1" />
-                              Add
-                            </Button>
+                <Card className="border-none shadow-lg">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="w-5 h-5 text-blue-500" />
+                      Smart Suggestions for {tripData.destination || "your trip"}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {(tripData.suggestions || []).length === 0 ? (
+                      <p className="text-gray-600">No suggestions yet.</p>
+                    ) : (
+                      (tripData.suggestions || []).map((s) => (
+                        <label
+                          key={s.id}
+                          className="flex items-center justify-between p-3 rounded-lg border bg-white"
+                        >
+                          <div className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={!!s.selected}
+                              onChange={(e) => toggleSuggestion(s.id, e.target.checked)}
+                              className="mt-1"
+                            />
+                            <div>
+                              <div className="text-gray-900">{s.text}</div>
+                              <div className="text-xs text-gray-500">
+                                {s.category} {s.reason ? `• ${s.reason}` : ""}
+                              </div>
+                            </div>
                           </div>
-                        )
-                      )}
-                    </CardContent>
-                  </Card>
-                )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() =>
+                              // quick add an accepted suggestion to items
+                              addItem({ name: s.text, quantity: 1, category: "Other" })
+                            }
+                          >
+                            <Plus className="w-4 h-4 mr-1" />
+                            Add to list
+                          </Button>
+                        </label>
+                      ))
+                    )}
+                  </CardContent>
+                </Card>
 
-                {tripData.ai_suggestions.climate?.length > 0 && (
-                  <Card className="border-none shadow-lg">
-                    <CardHeader>
-                      <CardTitle>
-                        Climate Recommendations
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      {tripData.ai_suggestions.climate.map(
-                        (tip, i) => (
-                          <div
-                            key={i}
-                            className="flex gap-3 p-3 bg-green-50 rounded-lg"
-                          >
-                            <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                            <span className="text-gray-900">
-                              {tip}
-                            </span>
-                          </div>
-                        )
-                      )}
-                    </CardContent>
-                  </Card>
-                )}
-
-                {tripData.ai_suggestions.purpose_specific
-                  ?.length > 0 && (
-                  <Card className="border-none shadow-lg">
-                    <CardHeader>
-                      <CardTitle>
-                        For Your {tripData.purpose}
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      {tripData.ai_suggestions.purpose_specific.map(
-                        (tip, i) => (
-                          <div
-                            key={i}
-                            className="flex gap-3 p-3 bg-purple-50 rounded-lg"
-                          >
-                            <CheckCircle className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" />
-                            <span className="text-gray-900">
-                              {tip}
-                            </span>
-                          </div>
-                        )
-                      )}
-                    </CardContent>
-                  </Card>
-                )}
+                <Card className="border-none shadow-lg">
+                  <CardHeader>
+                    <CardTitle>Add Your Own Recommendation</CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex gap-2">
+                    <Input
+                      placeholder="e.g., Sunglasses"
+                      value={customRec}
+                      onChange={(e) => setCustomRec(e.target.value)}
+                    />
+                    <Button onClick={addCustomSuggestion}>
+                      <Plus className="w-4 h-4 mr-1" />
+                      Add
+                    </Button>
+                  </CardContent>
+                </Card>
               </>
-            ) : null}
+            )}
           </div>
         )}
 
@@ -603,9 +621,7 @@ export default function NewTrip() {
               <Card className="border-none shadow-lg">
                 <CardContent className="py-16 text-center">
                   <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-                  <p className="text-gray-600">
-                    Calculating weights...
-                  </p>
+                  <p className="text-gray-600">Calculating weights...</p>
                 </CardContent>
               </Card>
             ) : (
@@ -619,59 +635,42 @@ export default function NewTrip() {
                   <h3 className="text-lg font-semibold mb-4 text-gray-900">
                     Items with Weights
                   </h3>
-                  <ItemsList
-                    items={tripData.items}
-                    showWeight={true}
-                  />
+                  <ItemsList items={tripData.items} showWeight={true} />
                 </div>
 
-                {tripData.optimization &&
-                  tripData.total_weight >
-                    tripData.airline_limit && (
-                    <Card className="border-none shadow-lg bg-yellow-50/50">
-                      <CardHeader>
-                        <CardTitle className="text-yellow-900">
-                          Optimization Suggestions
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div>
-                          <h4 className="font-medium text-gray-900 mb-2">
-                            Recommended to Keep:
-                          </h4>
-                          <div className="space-y-1">
-                            {tripData.optimization.keep?.map(
-                              (item, i) => (
-                                <div
-                                  key={i}
-                                  className="text-sm text-gray-700"
-                                >
-                                  ✓ {item}
-                                </div>
-                              )
-                            )}
-                          </div>
+                {tripData.optimization && tripData.total_weight > tripData.airline_limit && (
+                  <Card className="border-none shadow-lg bg-yellow-50/50">
+                    <CardHeader>
+                      <CardTitle className="text-yellow-900">Optimization Suggestions</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div>
+                        <h4 className="font-medium text-gray-900 mb-2">
+                          Recommended to Keep:
+                        </h4>
+                        <div className="space-y-1">
+                          {(tripData.optimization.keep || []).map((item, i) => (
+                            <div key={i} className="text-sm text-gray-700">
+                              ✓ {item.name || String(item)}
+                            </div>
+                          ))}
                         </div>
-                        <div>
-                          <h4 className="font-medium text-gray-900 mb-2">
-                            Consider Removing:
-                          </h4>
-                          <div className="space-y-1">
-                            {tripData.optimization.drop?.map(
-                              (item, i) => (
-                                <div
-                                  key={i}
-                                  className="text-sm text-gray-700"
-                                >
-                                  × {item}
-                                </div>
-                              )
-                            )}
-                          </div>
+                      </div>
+                      <div>
+                        <h4 className="font-medium text-gray-900 mb-2">
+                          Consider Removing:
+                        </h4>
+                        <div className="space-y-1">
+                          {(tripData.optimization.drop || []).map((item, i) => (
+                            <div key={i} className="text-sm text-gray-700">
+                              × {item.name || String(item)}
+                            </div>
+                          ))}
                         </div>
-                      </CardContent>
-                    </Card>
-                  )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
               </>
             )}
           </div>
@@ -684,12 +683,10 @@ export default function NewTrip() {
               <Card className="border-none shadow-lg">
                 <CardContent className="py-16 text-center">
                   <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-                  <p className="text-gray-600">
-                    Generating packing strategy...
-                  </p>
+                  <p className="text-gray-600">Generating packing strategy...</p>
                 </CardContent>
               </Card>
-            ) : tripData.packing_steps.length > 0 ? (
+            ) : tripData.packing_plan ? (
               <>
                 <Card className="border-none shadow-lg bg-gradient-to-br from-blue-50 to-white">
                   <CardHeader>
@@ -697,12 +694,30 @@ export default function NewTrip() {
                   </CardHeader>
                   <CardContent>
                     <p className="text-gray-600">
-                      Follow these steps for optimal packing:
+                      Suitcase size: {tripData.packing_plan.suitcaseSizeL}L • Follow the sequence below.
                     </p>
                   </CardContent>
                 </Card>
 
-                {tripData.packing_steps.map((step, i) => (
+                {/* Ordered Packing List (every single item in order) */}
+                <Card className="border-none shadow-md">
+                  <CardHeader>
+                    <CardTitle>Optimal Order (All Items)</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <ol className="list-decimal ml-6 space-y-1">
+                      {(tripData.packing_plan.orderedPackingList || []).map((it, idx) => (
+                        <li key={idx}>
+                          {it.name}{" "}
+                          <span className="text-xs opacity-60">({it.category})</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </CardContent>
+                </Card>
+
+                {/* Human-readable steps (with layers) */}
+                {(tripData.packing_steps || []).map((step, i) => (
                   <Card key={i} className="border-none shadow-md">
                     <CardContent className="pt-6">
                       <div className="flex gap-4">
@@ -713,9 +728,15 @@ export default function NewTrip() {
                           <h3 className="font-semibold text-lg mb-2 text-gray-900">
                             {step.title}
                           </h3>
-                          <p className="text-gray-600">
-                            {step.body}
-                          </p>
+                          {Array.isArray(step.items) && step.items.length > 0 ? (
+                            <ul className="list-disc ml-6 text-gray-700">
+                              {step.items.map((name, j) => (
+                                <li key={j}>{name}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="text-gray-600">{step.body}</p>
+                          )}
                         </div>
                       </div>
                     </CardContent>
