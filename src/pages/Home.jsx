@@ -1,28 +1,35 @@
-import React, { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { base44 } from '@/api/base44Client';
-import { Button } from '@/components/ui/button';
-import { Plus, Plane, Sparkles } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
-import { createPageUrl } from '@/utils';
-import TripCard from '../components/trips/TripCard';
-import { motion } from 'framer-motion';
+import React, { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import { Plus, Plane, Sparkles } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { createPageUrl } from "@/utils";
+import TripCard from "../components/trips/TripCard";
+import { motion } from "framer-motion";
+
+import { listTrips, getUid } from "../apiClient";
 
 export default function Home() {
   const navigate = useNavigate();
-  const [user, setUser] = useState(null);
 
-  useEffect(() => {
-    base44.auth.me().then(setUser).catch(() => {});
-  }, []);
-
-  const { data: trips, isLoading } = useQuery({
-    queryKey: ['trips'],
-    queryFn: () => base44.entities.Trip.list('-created_date'),
-    initialData: []
+  // Instead of base44.auth.me(), just use a placeholder "user"
+  // We'll plug in real Firebase client auth later.
+  const [user] = useState(() => {
+    const fallbackName = "Traveler";
+    const stored = localStorage.getItem("full_name");
+    return { full_name: stored || fallbackName };
   });
 
-  const firstName = user?.full_name?.split(' ')[0] || 'Traveler';
+  const uid = getUid(); // stable per-browser "user id" for now
+
+  // Grab trips from YOUR backend
+  const { data: trips = [], isLoading } = useQuery({
+    queryKey: ["trips", uid],
+    queryFn: () => listTrips(uid),
+    initialData: [],
+  });
+
+  const firstName = user?.full_name?.split(" ")[0] || "Traveler";
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50/30 via-white to-blue-50/20">
@@ -32,7 +39,7 @@ export default function Home() {
           <div className="absolute top-10 left-10 w-32 h-32 bg-white rounded-full blur-3xl" />
           <div className="absolute bottom-10 right-10 w-40 h-40 bg-white rounded-full blur-3xl" />
         </div>
-        
+
         <div className="max-w-4xl mx-auto relative">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -64,7 +71,7 @@ export default function Home() {
           className="mb-8"
         >
           <Button
-            onClick={() => navigate(createPageUrl('NewTrip'))}
+            onClick={() => navigate(createPageUrl("NewTrip"))}
             size="lg"
             className="w-full bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white shadow-lg hover:shadow-xl transition-all h-14 text-base"
           >
@@ -79,14 +86,19 @@ export default function Home() {
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-bold text-gray-900">Your Trips</h2>
             {trips.length > 0 && (
-              <span className="text-sm text-gray-500">{trips.length} trip{trips.length !== 1 ? 's' : ''}</span>
+              <span className="text-sm text-gray-500">
+                {trips.length} trip{trips.length !== 1 ? "s" : ""}
+              </span>
             )}
           </div>
 
           {isLoading ? (
             <div className="grid gap-4">
-              {[1, 2, 3].map(i => (
-                <div key={i} className="h-40 bg-gray-100 rounded-2xl animate-pulse" />
+              {[1, 2, 3].map((i) => (
+                <div
+                  key={i}
+                  className="h-40 bg-gray-100 rounded-2xl animate-pulse"
+                />
               ))}
             </div>
           ) : trips.length === 0 ? (
@@ -98,12 +110,15 @@ export default function Home() {
               <div className="w-20 h-20 bg-gradient-to-br from-blue-100 to-blue-200 rounded-full flex items-center justify-center mx-auto mb-4">
                 <Plane className="w-10 h-10 text-blue-600" />
               </div>
-              <h3 className="text-xl font-semibold text-gray-900 mb-2">No trips yet</h3>
+              <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                No trips yet
+              </h3>
               <p className="text-gray-500 mb-6 max-w-sm mx-auto">
-                Start planning your first trip and get AI-powered packing suggestions
+                Start planning your first trip and get AI-powered packing
+                suggestions
               </p>
               <Button
-                onClick={() => navigate(createPageUrl('NewTrip'))}
+                onClick={() => navigate(createPageUrl("NewTrip"))}
                 className="bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700"
               >
                 <Plus className="w-4 h-4 mr-2" />
@@ -112,11 +127,13 @@ export default function Home() {
             </motion.div>
           ) : (
             <div className="grid gap-4">
-              {trips.map(trip => (
+              {trips.map((trip) => (
                 <TripCard
                   key={trip.id}
                   trip={trip}
-                  onClick={() => navigate(createPageUrl('TripSummary') + `?id=${trip.id}`)}
+                  onClick={() =>
+                    navigate(createPageUrl("TripSummary") + `?id=${trip.id}`)
+                  }
                 />
               ))}
             </div>
