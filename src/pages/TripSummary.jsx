@@ -11,13 +11,16 @@ import {
   Calendar,
   Plane,
   Package,
+  Sparkles,
+  ListOrdered,
+  Luggage,
 } from "lucide-react";
 import { format } from "date-fns";
 
 import ItemsList from "../components/trips/ItemsList";
 import WeightDisplay from "../components/trips/WeightDisplay";
 
-// 🔁 you'll add these in apiClient.js
+// 🔁 API bridge
 import { getUid, fetchTripDetails } from "../apiClient";
 
 export default function TripSummary() {
@@ -31,7 +34,6 @@ export default function TripSummary() {
       try {
         const urlParams = new URLSearchParams(window.location.search);
         const tripId = urlParams.get("id");
-
         if (!tripId) {
           setLoading(false);
           return;
@@ -39,50 +41,57 @@ export default function TripSummary() {
 
         const uid = getUid();
 
-        // ask backend for this trip (and items)
-        // fetchTripDetails should call something like:
-        //   GET /trips/list?uid=... OR /trips/:id?uid=...
-        //   GET /trips/items?uid=...&tripId=...
-        //
-        // and combine them into one object.
-        //
-        // expected shape:
-        // {
-        //   trip: {...},
-        //   items: [...]
-        // }
-        const data = await fetchTripDetails(uid, tripId);
+        // fetchTripDetails should return either:
+        //  A) { ok:true, data:{ trip: {...} } }
+        //  B) { trip: {...} }
+        const raw = await fetchTripDetails(uid, tripId);
+        const apiTrip = raw?.data?.trip || raw?.trip || raw || null; // be resilient
+
+        if (!apiTrip) {
+          setTrip(null);
+          return;
+        }
+
+        // Items might be nested in trip or returned separately.
+        const itemsFromAPI = Array.isArray(apiTrip.items)
+          ? apiTrip.items
+          : Array.isArray(raw?.items)
+          ? raw.items
+          : [];
 
         // Map backend fields into the shape the UI expects
-        // Feel free to adjust this mapping based on your backend save format
         const mappedTrip = {
-          id: data.trip.id || tripId,
-          destination: data.trip.destination,
-          start_date: data.trip.startDate,
-          end_date: data.trip.endDate,
-          airline: data.trip.airline || "",
-          travel_class: data.trip.travelClass || data.trip.travel_class || "Economy",
-          purpose: data.trip.purpose || "Trip",
-          status: data.trip.status || "completed",
+          id: apiTrip.id || tripId,
+          destination: apiTrip.destination,
+          start_date: apiTrip.startDate,
+          end_date: apiTrip.endDate,
+          airline: apiTrip.airline || "",
+          travel_class: apiTrip.travelClass || apiTrip.travel_class || "Economy",
+          purpose: apiTrip.purpose || "Trip",
+          status: apiTrip.status || "completed",
 
           // weight/limits
           airline_limit:
-            data.trip.airlineLimitKg ??
-            data.trip.airline_limit ??
-            23,
+            apiTrip.airlineLimitKg ?? apiTrip.airline_limit ?? 23,
           total_weight:
-            data.trip.totalWeightKg ??
-            data.trip.total_weight ??
-            0,
+            apiTrip.totalWeightKg ?? apiTrip.total_weight ?? 0,
 
-          // packing stuff
-          packing_steps:
-            data.trip.packingSteps ??
-            data.trip.packing_steps ??
+          // suitcase size
+          suitcaseSizeL: apiTrip.suitcaseSizeL ?? apiTrip.suitcase_size_l ?? null,
+
+          // accepted AI recs
+          accepted_recommendations:
+            apiTrip.acceptedRecommendations ??
+            apiTrip.accepted_recommendations ??
             [],
 
+          // packing
+          packing_plan: apiTrip.packingPlan ?? apiTrip.packing_plan ?? null, // { orderedPackingList, steps, suitcaseSizeL }
+          packing_steps:
+            apiTrip.packingSteps ?? apiTrip.packing_steps ?? [],
+
           // items (with weights)
-          items: data.items || [],
+          items: itemsFromAPI || [],
         };
 
         setTrip(mappedTrip);
@@ -114,9 +123,7 @@ export default function TripSummary() {
       <div className="min-h-screen bg-gradient-to-b from-blue-50/30 via-white to-blue-50/20 flex items-center justify-center p-6">
         <div className="text-center">
           <Package className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">
-            Trip not found
-          </h2>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Trip not found</h2>
           <Button onClick={() => navigate(createPageUrl("Home"))}>
             <Home className="w-4 h-4 mr-2" />
             Back to Home
@@ -135,6 +142,10 @@ export default function TripSummary() {
     const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
     return days > 0 ? days : 1;
   })();
+
+  const orderedList = trip.packing_plan?.orderedPackingList || [];
+  const steps = trip.packing_plan?.steps || trip.packing_steps || [];
+  const acceptedRecs = trip.accepted_recommendations || [];
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50/30 via-white to-blue-50/20">
@@ -167,17 +178,11 @@ export default function TripSummary() {
                     <Calendar className="w-4 h-4" />
                     <span>
                       {trip.start_date
-                        ? format(
-                            new Date(trip.start_date),
-                            "MMM d"
-                          )
+                        ? format(new Date(trip.start_date), "MMM d")
                         : "?"}{" "}
                       -{" "}
                       {trip.end_date
-                        ? format(
-                            new Date(trip.end_date),
-                            "MMM d, yyyy"
-                          )
+                        ? format(new Date(trip.end_date), "MMM d, yyyy")
                         : "?"}
                     </span>
                   </div>
@@ -240,8 +245,44 @@ export default function TripSummary() {
                 {trip.status === "completed" ? "Completed" : "Draft"}
               </Badge>
             </div>
+
+            {trip.suitcaseSizeL ? (
+              <div className="col-span-2 md:col-span-1">
+                <p className="text-sm text-gray-500 mb-1 flex items-center gap-2">
+                  <Luggage className="w-4 h-4" />
+                  Suitcase Size
+                </p>
+                <Badge className="bg-amber-50 text-amber-700 border-amber-200">
+                  {trip.suitcaseSizeL} L
+                </Badge>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
+
+        {/* Accepted Recommendations (if any) */}
+        {acceptedRecs.length > 0 && (
+          <Card className="border-none shadow-lg">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-blue-500" />
+                Accepted Recommendations
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ul className="list-disc ml-6 space-y-1">
+                {acceptedRecs.map((r, idx) => (
+                  <li key={r.id || idx} className="text-gray-800">
+                    {r.text || r.name || String(r)}
+                    {r.category ? (
+                      <span className="text-xs opacity-60"> {" "}({r.category})</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Weight Summary */}
         {trip.total_weight ? (
@@ -251,7 +292,7 @@ export default function TripSummary() {
           />
         ) : null}
 
-        {/* Packing List */}
+        {/* Final Packing List (as saved items) */}
         <Card className="border-none shadow-lg">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -268,15 +309,37 @@ export default function TripSummary() {
           </CardContent>
         </Card>
 
-        {/* Packing Strategy */}
-        {trip.packing_steps && trip.packing_steps.length > 0 && (
+        {/* Optimal Packing Order (every single item) */}
+        {orderedList.length > 0 && (
+          <Card className="border-none shadow-lg">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <ListOrdered className="w-5 h-5" />
+                Optimal Packing Order
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ol className="list-decimal ml-6 space-y-1">
+                {orderedList.map((i, idx) => (
+                  <li key={idx}>
+                    {i.name}{" "}
+                    <span className="text-xs opacity-60">({i.category})</span>
+                  </li>
+                ))}
+              </ol>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Packing Strategy (layered steps) */}
+        {steps && steps.length > 0 && (
           <Card className="border-none shadow-lg">
             <CardHeader>
               <CardTitle>Packing Strategy</CardTitle>
             </CardHeader>
 
             <CardContent className="space-y-4">
-              {trip.packing_steps.map((step, i) => (
+              {steps.map((step, i) => (
                 <div key={i} className="flex gap-4">
                   <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0">
                     {i + 1}
@@ -285,7 +348,15 @@ export default function TripSummary() {
                     <h4 className="font-semibold text-gray-900 mb-1">
                       {step.title}
                     </h4>
-                    <p className="text-gray-600 text-sm">{step.body}</p>
+                    {Array.isArray(step.items) && step.items.length > 0 ? (
+                      <ul className="list-disc ml-6 text-gray-700">
+                        {step.items.map((name, j) => (
+                          <li key={j}>{name}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-gray-600 text-sm">{step.body}</p>
+                    )}
                   </div>
                 </div>
               ))}
