@@ -2,7 +2,9 @@
 
 const API_BASE = "https://yonewbackend.onrender.com"; // your Render backend URL
 
-// --- Simple temp user id until real auth ---
+//
+// TEMP USER ID
+//
 export function getUid() {
   let uid = localStorage.getItem("uid");
   if (!uid) {
@@ -12,7 +14,9 @@ export function getUid() {
   return uid;
 }
 
-// --- List all trips for this user ---
+//
+// TRIP LISTING
+//
 export async function listTrips(uid) {
   // GET /trips/list?uid=...
   const res = await fetch(
@@ -24,18 +28,20 @@ export async function listTrips(uid) {
   return json?.data?.trips || [];
 }
 
-// --- Fetch trip details + items ---
+//
+// SINGLE TRIP + ITEMS
+//
 export async function fetchTripDetails(uid, tripId) {
-  // 1. get all trips
+  // 1. get all user trips
   const trips = await listTrips(uid);
 
-  // 2. find the one we care about
-  const trip = trips.find(t => t.id === tripId);
+  // 2. pick the one we care about
+  const trip = trips.find((t) => t.id === tripId);
   if (!trip) {
     return { trip: null, items: [] };
   }
 
-  // 3. load its items
+  // 3. fetch that trip's items
   const itemsRes = await fetch(
     `${API_BASE}/trips/items?uid=${encodeURIComponent(uid)}&tripId=${encodeURIComponent(tripId)}`
   );
@@ -44,4 +50,98 @@ export async function fetchTripDetails(uid, tripId) {
   const items = itemsJson?.data?.items || [];
 
   return { trip, items };
+}
+
+//
+// AI SUGGESTIONS (Step 3)
+//
+export async function getAiSuggestions({
+  destination,
+  dates,
+  airline,
+  travelClass,
+  purpose,
+  items,
+}) {
+  const res = await fetch(`${API_BASE}/gemini/suggest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      destination,
+      dates,
+      airline,
+      travelClass,
+      purpose,
+      items,
+    }),
+  });
+
+  const json = await res.json();
+  // backend returns { ok: true, data: {...} }
+  return json?.data || null;
+}
+
+//
+// WEIGHT ESTIMATES (Step 4)
+//
+export async function getWeightEstimates({ items }) {
+  const res = await fetch(`${API_BASE}/gemini/weight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+
+  const json = await res.json();
+  // { ok: true, data: { items:[{...aiWeight}], totalG: number } }
+  return json?.data || { items: [], totalG: 0 };
+}
+
+//
+// OPTIMIZATION WHEN OVER LIMIT (Step 4)
+//
+export async function getOptimization({ items, limitKg }) {
+  const res = await fetch(`${API_BASE}/gemini/optimize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items, limitKg }),
+  });
+
+  const json = await res.json();
+  return json?.data || null;
+}
+
+//
+// PACKING STEPS (Step 5)
+//
+export async function getPackingSteps({ items, luggageType }) {
+  const res = await fetch(`${API_BASE}/gemini/steps`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items, luggageType }),
+  });
+
+  const json = await res.json();
+  // { ok: true, data: { steps:[{title,body}...] } }
+  return json?.data || { steps: [] };
+}
+
+//
+// SAVE TRIP TO FIRESTORE (called at "Finish Trip")
+//  -> You can use this in NewTrip.jsx when user hits Finish.
+//  -> This matches the /trips/save route in your backend.
+//
+export async function saveTripToBackend(uid, tripId, tripPayload) {
+  const res = await fetch(`${API_BASE}/trips/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      uid,
+      tripId: tripId || null,
+      trip: tripPayload,
+    }),
+  });
+
+  const json = await res.json();
+  // { ok: true, data: { tripId: "abc123" } }
+  return json?.data || null;
 }
