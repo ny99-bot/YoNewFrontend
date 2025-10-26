@@ -1,9 +1,8 @@
 // src/apiClient.js
 
-const API_BASE = "https://yonewbackend.onrender.com"; // <-- your Render backend URL
+const API_BASE = "https://yonewbackend.onrender.com"; // your Render backend URL
 
-// Temporary "user id" helper.
-// Later this will come from real auth. For now we just make a stable ID.
+// --- Simple temp user id until real auth ---
 export function getUid() {
   let uid = localStorage.getItem("uid");
   if (!uid) {
@@ -13,34 +12,36 @@ export function getUid() {
   return uid;
 }
 
-// Fetch trip info + its items for a given tripId
-export async function fetchTripDetails(uid, tripId) {
-  // 1. Get list of this user's trips
-  const tripsRes = await fetch(
+// --- List all trips for this user ---
+export async function listTrips(uid) {
+  // GET /trips/list?uid=...
+  const res = await fetch(
     `${API_BASE}/trips/list?uid=${encodeURIComponent(uid)}`
   );
 
-  const tripsJson = await tripsRes.json();
-  // tripsJson should look like { ok: true, data: { trips: [...] } }
-  const trips = tripsJson?.data?.trips || [];
+  const json = await res.json();
+  // backend responds { ok: true, data: { trips: [...] } }
+  return json?.data?.trips || [];
+}
 
-  // find the one trip we care about
+// --- Fetch trip details + items ---
+export async function fetchTripDetails(uid, tripId) {
+  // 1. get all trips
+  const trips = await listTrips(uid);
+
+  // 2. find the one we care about
   const trip = trips.find(t => t.id === tripId);
-
-  // If not found, return "nothing" so TripSummary can show "Trip not found"
   if (!trip) {
     return { trip: null, items: [] };
   }
 
-  // 2. Fetch this trip's items
+  // 3. load its items
   const itemsRes = await fetch(
     `${API_BASE}/trips/items?uid=${encodeURIComponent(uid)}&tripId=${encodeURIComponent(tripId)}`
   );
 
   const itemsJson = await itemsRes.json();
-  // itemsJson should look like { ok: true, data: { items: [...] } }
   const items = itemsJson?.data?.items || [];
 
-  // Return both together
   return { trip, items };
 }
