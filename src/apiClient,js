@@ -1,60 +1,72 @@
 // src/apiClient.js
 
-const API_BASE = "https://yonewbackend.onrender.com"; // your Render backend URL
+// 🌐 your deployed backend on Render
+const API_BASE = "https://yonewbackend.onrender.com";
 
-//
-// TEMP USER ID
-//
+// --------------------------------------------------
+// Basic UID helper so we can save/fetch per user
+// --------------------------------------------------
 export function getUid() {
   let uid = localStorage.getItem("uid");
   if (!uid) {
-    uid = "demo-user";
+    uid = "demo-user"; // fallback for now
     localStorage.setItem("uid", uid);
   }
   return uid;
 }
 
-//
-// TRIP LISTING
-//
+// --------------------------------------------------
+// List all trips for this user
+// GET /trips/list?uid=...
+// --------------------------------------------------
 export async function listTrips(uid) {
-  // GET /trips/list?uid=...
   const res = await fetch(
     `${API_BASE}/trips/list?uid=${encodeURIComponent(uid)}`
   );
-
   const json = await res.json();
-  // backend responds { ok: true, data: { trips: [...] } }
+  // backend returns { ok: true, data: { trips: [...] } }
   return json?.data?.trips || [];
 }
 
-//
-// SINGLE TRIP + ITEMS
-//
+// --------------------------------------------------
+// Fetch details for a specific trip id
+// We:
+// 1. get all trips
+// 2. find the right one
+// 3. fetch its items
+// --------------------------------------------------
 export async function fetchTripDetails(uid, tripId) {
-  // 1. get all user trips
   const trips = await listTrips(uid);
-
-  // 2. pick the one we care about
   const trip = trips.find((t) => t.id === tripId);
+
   if (!trip) {
     return { trip: null, items: [] };
   }
 
-  // 3. fetch that trip's items
+  // now pull its items
   const itemsRes = await fetch(
-    `${API_BASE}/trips/items?uid=${encodeURIComponent(uid)}&tripId=${encodeURIComponent(tripId)}`
+    `${API_BASE}/trips/items?uid=${encodeURIComponent(
+      uid
+    )}&tripId=${encodeURIComponent(tripId)}`
   );
-
   const itemsJson = await itemsRes.json();
   const items = itemsJson?.data?.items || [];
 
   return { trip, items };
 }
 
+// --------------------------------------------------
+// Step 3: AI Suggestions
+// POST /gemini/suggest
 //
-// AI SUGGESTIONS (Step 3)
-//
+// We normalize the server response to always return:
+// {
+//   missing: [...],
+//   climate: [...],
+//   purpose_specific: [...]
+// }
+// so the UI can safely read tripData.ai_suggestions.missing, etc.
+// --------------------------------------------------
 export async function getAiSuggestions({
   destination,
   dates,
@@ -77,14 +89,27 @@ export async function getAiSuggestions({
   });
 
   const json = await res.json();
-  // backend returns { ok: true, data: {...} }
-  return json?.data || null;
+  const raw = json?.data || {};
+
+  return {
+    missing: raw.missing || [],
+    climate: raw.climate || [],
+    // backend might call this "purpose" or "purpose_specific"
+    purpose_specific: raw.purpose_specific || raw.purpose || [],
+  };
 }
 
+// --------------------------------------------------
+// Step 4: Weight estimates
+// POST /gemini/weight
 //
-// WEIGHT ESTIMATES (Step 4)
-//
-export async function getWeightEstimates({ items }) {
+// Returns something like:
+// {
+//   items: [{ name, aiWeight, ... }],
+//   totalG: 1234
+// }
+// --------------------------------------------------
+export async function getWeights({ items }) {
   const res = await fetch(`${API_BASE}/gemini/weight`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,14 +117,22 @@ export async function getWeightEstimates({ items }) {
   });
 
   const json = await res.json();
-  // { ok: true, data: { items:[{...aiWeight}], totalG: number } }
-  return json?.data || { items: [], totalG: 0 };
+  return (
+    json?.data || {
+      items: [],
+      totalG: 0,
+    }
+  );
 }
 
+// --------------------------------------------------
+// Step 4 (if overweight): Optimization
+// POST /gemini/optimize
 //
-// OPTIMIZATION WHEN OVER LIMIT (Step 4)
-//
-export async function getOptimization({ items, limitKg }) {
+// Returns something like:
+// { keep: [...], drop: [...], totalG, limitG }
+// --------------------------------------------------
+export async function optimizeItems({ items, limitKg }) {
   const res = await fetch(`${API_BASE}/gemini/optimize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -110,9 +143,13 @@ export async function getOptimization({ items, limitKg }) {
   return json?.data || null;
 }
 
+// --------------------------------------------------
+// Step 5: Packing steps / strategy
+// POST /gemini/steps
 //
-// PACKING STEPS (Step 5)
-//
+// Returns { steps: [...], luggageType: "..." }
+// We'll hand just { steps: [...] } back to the UI.
+// --------------------------------------------------
 export async function getPackingSteps({ items, luggageType }) {
   const res = await fetch(`${API_BASE}/gemini/steps`, {
     method: "POST",
@@ -121,27 +158,66 @@ export async function getPackingSteps({ items, luggageType }) {
   });
 
   const json = await res.json();
-  // { ok: true, data: { steps:[{title,body}...] } }
-  return json?.data || { steps: [] };
+  return (
+    json?.data || {
+      steps: [],
+      luggageType,
+    }
+  );
 }
 
+// --------------------------------------------------
+// Final save: trip metadata
+// POST /trips/save
 //
-// SAVE TRIP TO FIRESTORE (called at "Finish Trip")
-//  -> You can use this in NewTrip.jsx when user hits Finish.
-//  -> This matches the /trips/save route in your backend.
+// We send:
+// { uid, tripId, trip: {...} }
 //
-export async function saveTripToBackend(uid, tripId, tripPayload) {
+// Server responds with:
+// { ok: true, data: { tripId: "abc123" } }
+//
+// We'll return that data so caller can know tripId.
+// --------------------------------------------------
+export async function saveTrip(uid, maybeTripId, tripPayload) {
   const res = await fetch(`${API_BASE}/trips/save`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       uid,
-      tripId: tripId || null,
-      trip: tripPayload,
+      tripId: maybeTripId || null,
+      trip: {
+        ...tripPayload,
+      },
     }),
   });
 
   const json = await res.json();
-  // { ok: true, data: { tripId: "abc123" } }
-  return json?.data || null;
+  // { tripId: "abc123" } or similar
+  return json?.data || {};
 }
+
+// --------------------------------------------------
+// Final save: trip items (bulk)
+// POST /trips/items/save
+//
+// We send:
+// { uid, tripId, items: [...] }
+//
+// This will batch upserts to Firestore on the server.
+// --------------------------------------------------
+export async function saveTripItems(uid, tripId, itemsArray) {
+  const res = await fetch(`${API_BASE}/trips/items/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      uid,
+      tripId,
+      items: itemsArray,
+    }),
+  });
+
+  const json = await res.json();
+  // { ok: true, data: { count: N } }
+  return json?.data || {};
+}
+
