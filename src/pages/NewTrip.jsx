@@ -10,6 +10,8 @@ import {
   getPackingSteps,
   saveTrip,
   saveTripItems,
+  // 🔸 NEW: suitcase lookup API
+  lookupLuggage,
 } from "../apiClient";
 
 import { Button } from "@/components/ui/button";
@@ -29,6 +31,7 @@ import {
   Sparkles,
   Plus,
   CheckCircle,
+  Search,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -50,6 +53,7 @@ export default function NewTrip() {
 
   // local UI helpers
   const [customRec, setCustomRec] = useState("");
+  const [luggageQuery, setLuggageQuery] = useState("");
 
   // working draft of the trip
   const [tripData, setTripData] = useState({
@@ -61,19 +65,24 @@ export default function NewTrip() {
     purpose: "Vacation",
     // suitcase size (liters) affects packing strategy
     suitcaseSizeL: 40, // 40 (carry-on), 60 (medium), 90 (large)
+    // optional precise dimensions (cm). If provided, we’ll send to backend and it will recompute liters from dims.
+    suitcaseDims: { lengthCm: "", widthCm: "", depthCm: "" },
+
     // items the user is packing
     items: [],
     // AI suggestions (toggle-able objects)
     suggestions: [], // [{id,text,category,reason,selected}]
     // raw legacy field (kept for compatibility, not used for UI now)
     ai_suggestions: null,
+
     // weight + airline limit info
     total_weight: 0,
     airline_limit: 23,
     optimization: null,
+
     // packing plan
     packing_steps: [],
-    packing_plan: null, // { suitcaseSizeL, orderedPackingList, steps }
+    packing_plan: null, // { suitcaseSizeL, suitcaseDims, orderedPackingList, steps }
   });
 
   // helper to update tripData
@@ -193,10 +202,11 @@ export default function NewTrip() {
         items: itemsForPack,
         recommendationsSelected: (tripData.suggestions || []).filter((s) => s.selected),
         suitcaseSizeL: tripData.suitcaseSizeL || 40,
+        suitcaseDims: normalizeDimsForApi(tripData.suitcaseDims),
         luggageType: "suitcase",
       });
 
-      // Expect shape: { suitcaseSizeL, orderedPackingList, steps }
+      // Expect shape: { suitcaseSizeL, suitcaseDims, orderedPackingList, steps }
       updateTripData({
         packing_plan: stepsData || null,
         packing_steps: stepsData?.steps || [],
@@ -216,7 +226,7 @@ export default function NewTrip() {
   const addItem = (item) => {
     updateTripData({
       items: [...tripData.items, item],
-      // reset things that depend on items so we can recompute
+      // reset computeds to recompute
       total_weight: 0,
       optimization: null,
       packing_plan: null,
@@ -256,6 +266,64 @@ export default function NewTrip() {
       ],
     });
     setCustomRec("");
+  };
+
+  //
+  // ====== LUGGAGE LOOKUP & MANUAL DIMS ======
+  //
+
+  function normalizeDimsForApi(dims) {
+    const L = Number(dims?.lengthCm);
+    const W = Number(dims?.widthCm);
+    const D = Number(dims?.depthCm);
+    if (!L || !W || !D) return null;
+    return { lengthCm: L, widthCm: W, depthCm: D };
+  }
+
+  const handleManualDimsChange = (key, val) => {
+    const next = {
+      ...tripData.suitcaseDims,
+      [key]: val,
+    };
+    // Optionally compute liters client-side (display only). The backend will recompute anyway.
+    let liters = tripData.suitcaseSizeL;
+    const L = Number(next.lengthCm),
+      W = Number(next.widthCm),
+      D = Number(next.depthCm);
+    if (L > 0 && W > 0 && D > 0) {
+      liters = Math.round((L * W * D) / 1000);
+    }
+    updateTripData({
+      suitcaseDims: next,
+      suitcaseSizeL: liters,
+      packing_plan: null,
+      packing_steps: [],
+    });
+  };
+
+  const handleLuggageLookup = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await lookupLuggage({ query: luggageQuery });
+      if (data?.dims) {
+        updateTripData({
+          suitcaseDims: {
+            lengthCm: String(data.dims.lengthCm ?? ""),
+            widthCm: String(data.dims.widthCm ?? ""),
+            depthCm: String(data.dims.depthCm ?? ""),
+          },
+          suitcaseSizeL: Number(data.liters ?? tripData.suitcaseSizeL),
+          packing_plan: null,
+          packing_steps: [],
+        });
+      }
+    } catch (e) {
+      console.error(e);
+      setError("Could not look up suitcase info.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   //
@@ -321,6 +389,7 @@ export default function NewTrip() {
         totalWeightKg: tripData.total_weight,
 
         suitcaseSizeL: tripData.suitcaseSizeL,
+        suitcaseDims: normalizeDimsForApi(tripData.suitcaseDims),
 
         // store what user accepted from AI
         acceptedRecommendations: acceptedRecs,
@@ -503,7 +572,13 @@ export default function NewTrip() {
                   <Label>Suitcase Size</Label>
                   <Select
                     value={String(tripData.suitcaseSizeL)}
-                    onValueChange={(v) => updateTripData({ suitcaseSizeL: Number(v) })}
+                    onValueChange={(v) =>
+                      updateTripData({
+                        suitcaseSizeL: Number(v),
+                        packing_plan: null,
+                        packing_steps: [],
+                      })
+                    }
                   >
                     <SelectTrigger className="mt-1">
                       <SelectValue placeholder="Choose size" />
@@ -514,6 +589,55 @@ export default function NewTrip() {
                       <SelectItem value="90">Large ~90L</SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+              </div>
+
+              {/* Suitcase: find online OR enter dimensions */}
+              <div className="grid gap-4">
+                <div>
+                  <Label>Find your suitcase (name or URL)</Label>
+                  <div className="flex gap-2 mt-1">
+                    <Input
+                      placeholder='e.g., "Samsonite 21”" or paste a product link'
+                      value={luggageQuery}
+                      onChange={(e) => setLuggageQuery(e.target.value)}
+                    />
+                    <Button type="button" onClick={handleLuggageLookup} variant="secondary">
+                      <Search className="w-4 h-4 mr-2" />
+                      Lookup
+                    </Button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    We’ll estimate dimensions (mocked now; can be powered by Gemini later).
+                  </p>
+                </div>
+
+                <div>
+                  <Label>Or enter dimensions (cm)</Label>
+                  <div className="grid grid-cols-3 gap-2 mt-1">
+                    <Input
+                      type="number"
+                      placeholder="Length"
+                      value={tripData.suitcaseDims.lengthCm}
+                      onChange={(e) => handleManualDimsChange("lengthCm", e.target.value)}
+                    />
+                    <Input
+                      type="number"
+                      placeholder="Width"
+                      value={tripData.suitcaseDims.widthCm}
+                      onChange={(e) => handleManualDimsChange("widthCm", e.target.value)}
+                    />
+                    <Input
+                      type="number"
+                      placeholder="Depth"
+                      value={tripData.suitcaseDims.depthCm}
+                      onChange={(e) => handleManualDimsChange("depthCm", e.target.value)}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    We’ll convert to liters automatically. Current estimate:{" "}
+                    <b>{tripData.suitcaseSizeL} L</b>
+                  </p>
                 </div>
               </div>
             </CardContent>
@@ -694,7 +818,11 @@ export default function NewTrip() {
                   </CardHeader>
                   <CardContent>
                     <p className="text-gray-600">
-                      Suitcase size: {tripData.packing_plan.suitcaseSizeL}L • Follow the sequence below.
+                      Suitcase size: {tripData.packing_plan.suitcaseSizeL}L
+                      {tripData.packing_plan.suitcaseDims
+                        ? ` • ${tripData.packing_plan.suitcaseDims.lengthCm}×${tripData.packing_plan.suitcaseDims.widthCm}×${tripData.packing_plan.suitcaseDims.depthCm} cm`
+                        : ""}{" "}
+                      • Follow the sequence below.
                     </p>
                   </CardContent>
                 </Card>
