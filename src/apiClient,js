@@ -1,86 +1,46 @@
 // src/apiClient.js
-const API_BASE = "https://yonewbackend.onrender.com";
 
-// Temporary user ID until we hook up real Firebase client auth
+const API_BASE = "https://yonewbackend.onrender.com"; // <-- your Render backend URL
+
+// Temporary "user id" helper.
+// Later this will come from real auth. For now we just make a stable ID.
 export function getUid() {
-  let uid = localStorage.getItem("packit_uid");
+  let uid = localStorage.getItem("uid");
   if (!uid) {
-    uid = `demo-${Math.random().toString(36).slice(2, 10)}`;
-    localStorage.setItem("packit_uid", uid);
+    uid = "demo-user";
+    localStorage.setItem("uid", uid);
   }
   return uid;
 }
 
-/* ---------- Trips endpoints ---------- */
-export async function listTrips(uid = getUid()) {
-  const res = await fetch(`${API_BASE}/trips/list?uid=${encodeURIComponent(uid)}`);
-  const json = await res.json();
-  if (!json.ok) return [];
-  return json.data?.trips ?? [];
-}
+// Fetch trip info + its items for a given tripId
+export async function fetchTripDetails(uid, tripId) {
+  // 1. Get list of this user's trips
+  const tripsRes = await fetch(
+    `${API_BASE}/trips/list?uid=${encodeURIComponent(uid)}`
+  );
 
-// We'll use the rest of these later in other screens:
-export async function saveTrip(uid, tripId, trip) {
-  const res = await fetch(`${API_BASE}/trips/save`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uid, tripId, trip }),
-  });
-  return res.json();
-}
+  const tripsJson = await tripsRes.json();
+  // tripsJson should look like { ok: true, data: { trips: [...] } }
+  const trips = tripsJson?.data?.trips || [];
 
-export async function saveTripItems(uid, tripId, items) {
-  const res = await fetch(`${API_BASE}/trips/items/save`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uid, tripId, items }),
-  });
-  return res.json();
-}
+  // find the one trip we care about
+  const trip = trips.find(t => t.id === tripId);
 
-export async function getTripItems(uid, tripId) {
-  const res = await fetch(
+  // If not found, return "nothing" so TripSummary can show "Trip not found"
+  if (!trip) {
+    return { trip: null, items: [] };
+  }
+
+  // 2. Fetch this trip's items
+  const itemsRes = await fetch(
     `${API_BASE}/trips/items?uid=${encodeURIComponent(uid)}&tripId=${encodeURIComponent(tripId)}`
   );
-  const json = await res.json();
-  if (!json.ok) return [];
-  return json.data?.items ?? [];
-}
 
-/* ---------- AI helpers (we'll wire these into other pages soon) ---------- */
-export async function getAiSuggestions({ destination, dates, airline, travelClass, purpose, items }) {
-  const res = await fetch(`${API_BASE}/gemini/suggest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ destination, dates, airline, travelClass, purpose, items }),
-  });
-  return res.json();
-}
+  const itemsJson = await itemsRes.json();
+  // itemsJson should look like { ok: true, data: { items: [...] } }
+  const items = itemsJson?.data?.items || [];
 
-export async function getWeights(items) {
-  const res = await fetch(`${API_BASE}/gemini/weight`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items }),
-  });
-  return res.json();
+  // Return both together
+  return { trip, items };
 }
-
-export async function optimizeItems(items, limitKg = 23) {
-  const res = await fetch(`${API_BASE}/gemini/optimize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, limitKg }),
-  });
-  return res.json();
-}
-
-export async function getPackingSteps(items, luggageType = "carry-on") {
-  const res = await fetch(`${API_BASE}/gemini/steps`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, luggageType }),
-  });
-  return res.json();
-}
-
