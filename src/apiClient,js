@@ -1,6 +1,6 @@
 // src/apiClient.js
 
-// 🌐 Your deployed backend on Render
+// 🌐 Your deployed backend on Render (override with Vite env if present)
 const API_BASE = import.meta?.env?.VITE_API_BASE || "https://yonewbackend.onrender.com";
 
 /* --------------------------------------------------
@@ -37,8 +37,7 @@ export async function fetchTripDetails(uid, tripId) {
   const res = await fetch(
     `${API_BASE}/trips/get?uid=${encodeURIComponent(uid)}&tripId=${encodeURIComponent(tripId)}`
   );
-  // Return raw so TripSummary can handle both shapes
-  return await res.json();
+  return await res.json(); // raw; TripSummary handles shape
 }
 
 /* --------------------------------------------------
@@ -54,15 +53,13 @@ export async function getAiSuggestions({ destination, dates, airline, travelClas
     body: JSON.stringify({ destination, dates, airline, travelClass, purpose, items }),
   });
   const json = await res.json();
-  // Pass through the server's normalized shape
   return json?.data || { suggestions: [] };
 }
 
 /* --------------------------------------------------
    Step 4: Weight estimates
    POST /gemini/weight
-   Returns:
-     { items: [{ ...item, aiWeight }], totalG }
+   Returns: { items: [{ ...item, aiWeight }], totalG }
 -------------------------------------------------- */
 export async function getWeights({ items }) {
   const res = await fetch(`${API_BASE}/gemini/weight`, {
@@ -77,8 +74,7 @@ export async function getWeights({ items }) {
 /* --------------------------------------------------
    Step 4 (if overweight): Optimize list
    POST /gemini/optimize
-   Returns:
-     { keep: [...items], drop: [...items], totalG, limitG }
+   Returns: { keep: [...items], drop: [...items], totalG, limitG }
 -------------------------------------------------- */
 export async function optimizeItems({ items, limitKg }) {
   const res = await fetch(`${API_BASE}/gemini/optimize`, {
@@ -91,30 +87,63 @@ export async function optimizeItems({ items, limitKg }) {
 }
 
 /* --------------------------------------------------
+   NEW: Suitcase lookup (brand/model URL or text)
+   POST /luggage/lookup
+   Returns: { dims:{lengthCm,widthCm,depthCm}, liters }
+-------------------------------------------------- */
+export async function lookupLuggage({ query }) {
+  const res = await fetch(`${API_BASE}/luggage/lookup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  const json = await res.json();
+  return json?.data || {};
+}
+
+/* --------------------------------------------------
    Step 5: Packing strategy
    POST /gemini/steps
    Send:
-     { items, recommendationsSelected, suitcaseSizeL, luggageType }
+     { items, recommendationsSelected, suitcaseSizeL, suitcaseDims, luggageType }
    Returns:
-     { suitcaseSizeL, luggageType, orderedPackingList: [...], steps: [...] }
+     { suitcaseSizeL, suitcaseDims, luggageType, orderedPackingList: [...], steps: [...] }
 -------------------------------------------------- */
-export async function getPackingSteps({ items, recommendationsSelected, suitcaseSizeL, luggageType }) {
+export async function getPackingSteps({
+  items,
+  recommendationsSelected,
+  suitcaseSizeL,
+  suitcaseDims,      // <-- now supported
+  luggageType,
+}) {
   const res = await fetch(`${API_BASE}/gemini/steps`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, recommendationsSelected, suitcaseSizeL, luggageType }),
+    body: JSON.stringify({
+      items,
+      recommendationsSelected,
+      suitcaseSizeL,
+      suitcaseDims,   // <-- pass to backend
+      luggageType,
+    }),
   });
   const json = await res.json();
-  return json?.data || { suitcaseSizeL, luggageType, orderedPackingList: [], steps: [] };
+  return (
+    json?.data || {
+      suitcaseSizeL,
+      suitcaseDims,
+      luggageType,
+      orderedPackingList: [],
+      steps: [],
+    }
+  );
 }
 
 /* --------------------------------------------------
    Save trip metadata
    POST /trips/save
-   Body:
-     { uid, tripId, trip: {...} }
-   Returns:
-     { tripId }
+   Body: { uid, tripId, trip: {...} }
+   Returns: { tripId }
 -------------------------------------------------- */
 export async function saveTrip(uid, maybeTripId, tripPayload) {
   const res = await fetch(`${API_BASE}/trips/save`, {
@@ -129,17 +158,9 @@ export async function saveTrip(uid, maybeTripId, tripPayload) {
 /* --------------------------------------------------
    Save trip items (bulk)
    POST /trips/items/save
-   Body:
-     { uid, tripId, items: [...] }
-   Returns:
-     { count: N }
+   Body: { uid, tripId, items: [...] }
+   Returns: { count: N }
 -------------------------------------------------- */
 export async function saveTripItems(uid, tripId, itemsArray) {
-  const res = await fetch(`${API_BASE}/trips/items/save`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uid, tripId, items: itemsArray }),
-  });
-  const json = await res.json();
-  return json?.data || {};
-}
+  const res = await fetch(`${API_BASE}/trips/items/save`, {_
+
