@@ -1,74 +1,133 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { createPageUrl } from '@/utils';
-import { base44 } from '@/api/base44Client';
-import { backendAPI } from '../components/api/backendAPI';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ArrowLeft, ArrowRight, Loader2, Sparkles, Plus, CheckCircle } from 'lucide-react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { createPageUrl } from "@/utils";
 
-import StepIndicator from '../components/trips/StepIndicator';
-import ItemForm from '../components/trips/ItemForm';
-import ItemsList from '../components/trips/ItemsList';
-import WeightDisplay from '../components/trips/WeightDisplay';
+import {
+  getUid,
+  getAiSuggestions,
+  getWeights,
+  optimizeItems,
+  getPackingSteps,
+  saveTrip,
+  saveTripItems,
+} from "../apiClient";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Loader2,
+  Sparkles,
+  Plus,
+  CheckCircle,
+} from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+import StepIndicator from "../components/trips/StepIndicator";
+import ItemForm from "../components/trips/ItemForm";
+import ItemsList from "../components/trips/ItemsList";
+import WeightDisplay from "../components/trips/WeightDisplay";
 
 export default function NewTrip() {
   const navigate = useNavigate();
+
+  // which screen we're on
   const [currentStep, setCurrentStep] = useState(1);
+
+  // UX state
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // this is the working draft of the trip we're building
   const [tripData, setTripData] = useState({
-    destination: '',
-    start_date: '',
-    end_date: '',
-    airline: '',
-    travel_class: 'Economy',
-    purpose: 'Vacation',
+    destination: "",
+    start_date: "",
+    end_date: "",
+    airline: "",
+    travel_class: "Economy",
+    purpose: "Vacation",
+    // items the user is packing
     items: [],
+    // AI results
     ai_suggestions: null,
+    // weight + airline limit info
     total_weight: 0,
     airline_limit: 23,
+    optimization: null,
+    // packing plan
     packing_steps: [],
-    optimization: null
   });
 
+  // helper to update tripData
   const updateTripData = (updates) => {
-    setTripData(prev => ({ ...prev, ...updates }));
+    setTripData((prev) => ({ ...prev, ...updates }));
   };
 
-  // Auto-trigger AI calls when entering steps 3, 4, 5
+  //
+  // ====== AUTO-RUN LOGIC FOR STEPS 3,4,5 ======
+  //
   useEffect(() => {
+    // Step 3 => get AI suggestions
     if (currentStep === 3 && !tripData.ai_suggestions && !loading) {
       fetchAISuggestions();
     }
-    if (currentStep === 4 && !tripData.total_weight && !loading) {
+
+    // Step 4 => get weight + optimization
+    if (currentStep === 4 && tripData.total_weight === 0 && !loading) {
       fetchWeightData();
     }
-    if (currentStep === 5 && tripData.packing_steps.length === 0 && !loading) {
+
+    // Step 5 => get packing steps
+    if (
+      currentStep === 5 &&
+      tripData.packing_steps.length === 0 &&
+      !loading
+    ) {
       fetchPackingSteps();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
+
+  //
+  // ====== BACKEND CALLS (YOUR RENDER API) ======
+  //
 
   const fetchAISuggestions = async () => {
     setLoading(true);
     setError(null);
     try {
-      const suggestions = await backendAPI.getSuggestions({
+      const suggestions = await getAiSuggestions({
         destination: tripData.destination,
-        dates: { start: tripData.start_date, end: tripData.end_date },
+        dates: {
+          start: tripData.start_date,
+          end: tripData.end_date,
+        },
         airline: tripData.airline,
         travelClass: tripData.travel_class,
         purpose: tripData.purpose,
-        items: tripData.items
+        items: tripData.items,
       });
-      updateTripData({ ai_suggestions: suggestions });
+
+      // suggestions is expected to look like:
+      // { missing: [...], climate: [...], purpose: [...] }
+      updateTripData({
+        ai_suggestions: suggestions,
+      });
     } catch (err) {
-      setError('Failed to get AI suggestions. Please check your backend connection.');
+      console.error(err);
+      setError(
+        "Failed to get AI suggestions. Please check your backend connection."
+      );
     } finally {
       setLoading(false);
     }
@@ -78,32 +137,39 @@ export default function NewTrip() {
     setLoading(true);
     setError(null);
     try {
-      const weightData = await backendAPI.getWeightEstimates({
-        items: tripData.items
+      // call backend to estimate weights
+      const weightData = await getWeights({
+        items: tripData.items,
       });
-      
+      // weightData: { items: [{... item, aiWeight }...], totalG }
+
+      // attach aiWeight -> weight on each item
       const itemsWithWeights = tripData.items.map((item, i) => ({
         ...item,
-        weight: weightData.items[i]?.aiWeight || 0
+        weight: weightData.items?.[i]?.aiWeight || 0,
       }));
-      
-      const totalWeight = weightData.totalG / 1000;
-      
-      let optimization = null;
-      if (totalWeight > tripData.airline_limit) {
-        optimization = await backendAPI.getOptimization({
+
+      const totalWeightKg = (weightData.totalG || 0) / 1000;
+
+      let optimizationResult = null;
+      if (totalWeightKg > tripData.airline_limit) {
+        optimizationResult = await optimizeItems({
           items: itemsWithWeights,
-          limitKg: tripData.airline_limit
+          limitKg: tripData.airline_limit,
         });
+        // optimizationResult: { keep, drop, totalG, limitG }
       }
-      
+
       updateTripData({
         items: itemsWithWeights,
-        total_weight: totalWeight,
-        optimization
+        total_weight: totalWeightKg,
+        optimization: optimizationResult,
       });
     } catch (err) {
-      setError('Failed to calculate weights. Please check your backend connection.');
+      console.error(err);
+      setError(
+        "Failed to calculate weights. Please check your backend connection."
+      );
     } finally {
       setLoading(false);
     }
@@ -113,37 +179,64 @@ export default function NewTrip() {
     setLoading(true);
     setError(null);
     try {
-      const stepsData = await backendAPI.getPackingSteps({
+      const stepsData = await getPackingSteps({
         items: tripData.items,
-        luggageType: 'suitcase'
+        luggageType: "suitcase", // you can make this dynamic later
       });
-      updateTripData({ packing_steps: stepsData.steps });
+
+      // stepsData: { steps: [ { title, body }, ... ], luggageType }
+      updateTripData({
+        packing_steps: stepsData.steps || [],
+      });
     } catch (err) {
-      setError('Failed to get packing strategy. Please check your backend connection.');
+      console.error(err);
+      setError(
+        "Failed to get packing strategy. Please check your backend connection."
+      );
     } finally {
       setLoading(false);
     }
   };
 
+  //
+  // ====== LOCAL ITEM EDITING ======
+  //
+
   const addItem = (item) => {
-    updateTripData({ items: [...tripData.items, item] });
+    updateTripData({
+      items: [...tripData.items, item],
+    });
   };
 
   const removeItem = (index) => {
-    updateTripData({ items: tripData.items.filter((_, i) => i !== index) });
+    updateTripData({
+      items: tripData.items.filter((_, i) => i !== index),
+    });
   };
 
   const addSuggestedItem = (itemName) => {
-    addItem({ name: itemName, quantity: 1, category: 'Other' });
+    addItem({
+      name: itemName,
+      quantity: 1,
+      category: "Other",
+    });
   };
+
+  //
+  // ====== NAV BETWEEN STEPS ======
+  //
 
   const handleNext = async () => {
     setError(null);
-    
+
     // Step 1 validation
     if (currentStep === 1) {
-      if (!tripData.destination || !tripData.start_date || !tripData.end_date) {
-        setError('Please fill in all required fields');
+      if (
+        !tripData.destination ||
+        !tripData.start_date ||
+        !tripData.end_date
+      ) {
+        setError("Please fill in all required fields");
         return;
       }
     }
@@ -151,38 +244,78 @@ export default function NewTrip() {
     // Step 2 validation
     if (currentStep === 2) {
       if (tripData.items.length === 0) {
-        setError('Please add at least one item to your packing list');
+        setError("Please add at least one item to your packing list");
         return;
       }
     }
 
-    // Step 5: Save trip
+    // Final step => save trip
     if (currentStep === 5) {
-      await saveTrip();
+      await handleSaveTrip();
       return;
     }
 
-    setCurrentStep(currentStep + 1);
+    setCurrentStep((s) => s + 1);
   };
 
   const handleBack = () => {
     setError(null);
-    setCurrentStep(currentStep - 1);
+    setCurrentStep((s) => s - 1);
   };
 
-  const saveTrip = async () => {
+  //
+  // ====== SAVE FINAL TRIP TO YOUR BACKEND ======
+  //
+
+  const handleSaveTrip = async () => {
     setLoading(true);
+    setError(null);
+
     try {
-      const trip = await base44.entities.Trip.create({
-        ...tripData,
-        status: 'completed'
-      });
-      navigate(createPageUrl('TripSummary') + `?id=${trip.id}`);
+      const uid = getUid(); // comes from apiClient (localStorage fallback)
+
+      // Build a shape the backend can store
+      // You get to define this. Here's a reasonable default:
+      const tripPayload = {
+        destination: tripData.destination,
+        startDate: tripData.start_date,
+        endDate: tripData.end_date,
+        airline: tripData.airline,
+        travelClass: tripData.travel_class,
+        purpose: tripData.purpose,
+        status: "completed",
+
+        // optional extras you may want to store:
+        airlineLimitKg: tripData.airline_limit,
+        totalWeightKg: tripData.total_weight,
+        aiSuggestions: tripData.ai_suggestions,
+        packingSteps: tripData.packing_steps,
+        optimization: tripData.optimization,
+        createdAt: new Date().toISOString(),
+      };
+
+      // saveTrip(uid, tripId?, tripData)
+      // - tripId can be null to create a new one
+      // This should return { tripId: "abc123" } (you can implement that in apiClient/server)
+      const { tripId } = await saveTrip(uid, null, tripPayload);
+
+      // Then save items in bulk
+      // saveTripItems(uid, tripId, itemsArray)
+      await saveTripItems(uid, tripId, tripData.items);
+
+      // After saving, go to summary
+      navigate(createPageUrl("TripSummary") + `?id=${tripId}`);
     } catch (err) {
-      setError('Failed to save trip. Please try again.');
+      console.error(err);
+      setError("Failed to save trip. Please try again.");
+    } finally {
       setLoading(false);
     }
   };
+
+  //
+  // ====== RENDER UI ======
+  //
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50/30 via-white to-blue-50/20 pb-8">
@@ -193,7 +326,11 @@ export default function NewTrip() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => currentStep === 1 ? navigate(createPageUrl('Home')) : handleBack()}
+              onClick={() =>
+                currentStep === 1
+                  ? navigate(createPageUrl("Home"))
+                  : handleBack()
+              }
               disabled={loading}
             >
               <ArrowLeft className="w-5 h-5" />
@@ -211,7 +348,7 @@ export default function NewTrip() {
           </Alert>
         )}
 
-        {/* Step 1: Trip Details */}
+        {/* STEP 1: TRIP DETAILS */}
         {currentStep === 1 && (
           <Card className="border-none shadow-lg">
             <CardHeader>
@@ -223,7 +360,9 @@ export default function NewTrip() {
                 <Input
                   id="destination"
                   value={tripData.destination}
-                  onChange={(e) => updateTripData({ destination: e.target.value })}
+                  onChange={(e) =>
+                    updateTripData({ destination: e.target.value })
+                  }
                   placeholder="e.g., Paris, Tokyo, New York"
                   className="mt-1"
                 />
@@ -236,7 +375,9 @@ export default function NewTrip() {
                     id="start_date"
                     type="date"
                     value={tripData.start_date}
-                    onChange={(e) => updateTripData({ start_date: e.target.value })}
+                    onChange={(e) =>
+                      updateTripData({ start_date: e.target.value })
+                    }
                     className="mt-1"
                   />
                 </div>
@@ -246,7 +387,9 @@ export default function NewTrip() {
                     id="end_date"
                     type="date"
                     value={tripData.end_date}
-                    onChange={(e) => updateTripData({ end_date: e.target.value })}
+                    onChange={(e) =>
+                      updateTripData({ end_date: e.target.value })
+                    }
                     className="mt-1"
                   />
                 </div>
@@ -257,7 +400,9 @@ export default function NewTrip() {
                 <Input
                   id="airline"
                   value={tripData.airline}
-                  onChange={(e) => updateTripData({ airline: e.target.value })}
+                  onChange={(e) =>
+                    updateTripData({ airline: e.target.value })
+                  }
                   placeholder="e.g., Delta, United, Emirates"
                   className="mt-1"
                 />
@@ -266,16 +411,20 @@ export default function NewTrip() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <Label>Cabin Class</Label>
-                  <Select 
-                    value={tripData.travel_class} 
-                    onValueChange={(value) => updateTripData({ travel_class: value })}
+                  <Select
+                    value={tripData.travel_class}
+                    onValueChange={(value) =>
+                      updateTripData({ travel_class: value })
+                    }
                   >
                     <SelectTrigger className="mt-1">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Economy">Economy</SelectItem>
-                      <SelectItem value="Premium Economy">Premium Economy</SelectItem>
+                      <SelectItem value="Premium Economy">
+                        Premium Economy
+                      </SelectItem>
                       <SelectItem value="Business">Business</SelectItem>
                       <SelectItem value="First">First</SelectItem>
                     </SelectContent>
@@ -284,9 +433,11 @@ export default function NewTrip() {
 
                 <div>
                   <Label>Trip Purpose</Label>
-                  <Select 
-                    value={tripData.purpose} 
-                    onValueChange={(value) => updateTripData({ purpose: value })}
+                  <Select
+                    value={tripData.purpose}
+                    onValueChange={(value) =>
+                      updateTripData({ purpose: value })
+                    }
                   >
                     <SelectTrigger className="mt-1">
                       <SelectValue />
@@ -295,7 +446,9 @@ export default function NewTrip() {
                       <SelectItem value="Vacation">Vacation</SelectItem>
                       <SelectItem value="Business">Business</SelectItem>
                       <SelectItem value="Adventure">Adventure</SelectItem>
-                      <SelectItem value="Family Visit">Family Visit</SelectItem>
+                      <SelectItem value="Family Visit">
+                        Family Visit
+                      </SelectItem>
                       <SelectItem value="Other">Other</SelectItem>
                     </SelectContent>
                   </Select>
@@ -308,7 +461,12 @@ export default function NewTrip() {
                   id="airline_limit"
                   type="number"
                   value={tripData.airline_limit}
-                  onChange={(e) => updateTripData({ airline_limit: parseFloat(e.target.value) || 23 })}
+                  onChange={(e) =>
+                    updateTripData({
+                      airline_limit:
+                        parseFloat(e.target.value) || 23,
+                    })
+                  }
                   className="mt-1"
                 />
               </div>
@@ -316,26 +474,33 @@ export default function NewTrip() {
           </Card>
         )}
 
-        {/* Step 2: Packing Items */}
+        {/* STEP 2: PACKING ITEMS */}
         {currentStep === 2 && (
           <div className="space-y-6">
             <ItemForm onAddItem={addItem} />
-            
+
             <div>
-              <h3 className="text-lg font-semibold mb-4 text-gray-900">Your Packing List</h3>
-              <ItemsList items={tripData.items} onRemoveItem={removeItem} />
+              <h3 className="text-lg font-semibold mb-4 text-gray-900">
+                Your Packing List
+              </h3>
+              <ItemsList
+                items={tripData.items}
+                onRemoveItem={removeItem}
+              />
             </div>
           </div>
         )}
 
-        {/* Step 3: AI Suggestions */}
+        {/* STEP 3: AI SUGGESTIONS */}
         {currentStep === 3 && (
           <div className="space-y-6">
             {loading ? (
               <Card className="border-none shadow-lg">
                 <CardContent className="py-16 text-center">
                   <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-                  <p className="text-gray-600">Getting AI suggestions...</p>
+                  <p className="text-gray-600">
+                    Getting AI suggestions...
+                  </p>
                 </CardContent>
               </Card>
             ) : tripData.ai_suggestions ? (
@@ -349,20 +514,29 @@ export default function NewTrip() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                      {tripData.ai_suggestions.missing.map((item, i) => (
-                        <div key={i} className="flex items-center justify-between p-3 bg-blue-50 rounded-lg">
-                          <span className="text-gray-900">{item}</span>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => addSuggestedItem(item)}
-                            className="text-blue-600 hover:text-blue-700"
+                      {tripData.ai_suggestions.missing.map(
+                        (item, i) => (
+                          <div
+                            key={i}
+                            className="flex items-center justify-between p-3 bg-blue-50 rounded-lg"
                           >
-                            <Plus className="w-4 h-4 mr-1" />
-                            Add
-                          </Button>
-                        </div>
-                      ))}
+                            <span className="text-gray-900">
+                              {item}
+                            </span>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                addSuggestedItem(item)
+                              }
+                              className="text-blue-600 hover:text-blue-700"
+                            >
+                              <Plus className="w-4 h-4 mr-1" />
+                              Add
+                            </Button>
+                          </div>
+                        )
+                      )}
                     </CardContent>
                   </Card>
                 )}
@@ -370,31 +544,50 @@ export default function NewTrip() {
                 {tripData.ai_suggestions.climate?.length > 0 && (
                   <Card className="border-none shadow-lg">
                     <CardHeader>
-                      <CardTitle>Climate Recommendations</CardTitle>
+                      <CardTitle>
+                        Climate Recommendations
+                      </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                      {tripData.ai_suggestions.climate.map((tip, i) => (
-                        <div key={i} className="flex gap-3 p-3 bg-green-50 rounded-lg">
-                          <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                          <span className="text-gray-900">{tip}</span>
-                        </div>
-                      ))}
+                      {tripData.ai_suggestions.climate.map(
+                        (tip, i) => (
+                          <div
+                            key={i}
+                            className="flex gap-3 p-3 bg-green-50 rounded-lg"
+                          >
+                            <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                            <span className="text-gray-900">
+                              {tip}
+                            </span>
+                          </div>
+                        )
+                      )}
                     </CardContent>
                   </Card>
                 )}
 
-                {tripData.ai_suggestions.purpose_specific?.length > 0 && (
+                {tripData.ai_suggestions.purpose_specific
+                  ?.length > 0 && (
                   <Card className="border-none shadow-lg">
                     <CardHeader>
-                      <CardTitle>For Your {tripData.purpose}</CardTitle>
+                      <CardTitle>
+                        For Your {tripData.purpose}
+                      </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                      {tripData.ai_suggestions.purpose_specific.map((tip, i) => (
-                        <div key={i} className="flex gap-3 p-3 bg-purple-50 rounded-lg">
-                          <CheckCircle className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" />
-                          <span className="text-gray-900">{tip}</span>
-                        </div>
-                      ))}
+                      {tripData.ai_suggestions.purpose_specific.map(
+                        (tip, i) => (
+                          <div
+                            key={i}
+                            className="flex gap-3 p-3 bg-purple-50 rounded-lg"
+                          >
+                            <CheckCircle className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" />
+                            <span className="text-gray-900">
+                              {tip}
+                            </span>
+                          </div>
+                        )
+                      )}
                     </CardContent>
                   </Card>
                 )}
@@ -403,63 +596,97 @@ export default function NewTrip() {
           </div>
         )}
 
-        {/* Step 4: Weight & Limits */}
+        {/* STEP 4: WEIGHT & LIMITS */}
         {currentStep === 4 && (
           <div className="space-y-6">
             {loading ? (
               <Card className="border-none shadow-lg">
                 <CardContent className="py-16 text-center">
                   <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-                  <p className="text-gray-600">Calculating weights...</p>
+                  <p className="text-gray-600">
+                    Calculating weights...
+                  </p>
                 </CardContent>
               </Card>
             ) : (
               <>
-                <WeightDisplay totalWeight={tripData.total_weight} limit={tripData.airline_limit} />
-                
+                <WeightDisplay
+                  totalWeight={tripData.total_weight}
+                  limit={tripData.airline_limit}
+                />
+
                 <div>
-                  <h3 className="text-lg font-semibold mb-4 text-gray-900">Items with Weights</h3>
-                  <ItemsList items={tripData.items} showWeight={true} />
+                  <h3 className="text-lg font-semibold mb-4 text-gray-900">
+                    Items with Weights
+                  </h3>
+                  <ItemsList
+                    items={tripData.items}
+                    showWeight={true}
+                  />
                 </div>
 
-                {tripData.optimization && tripData.total_weight > tripData.airline_limit && (
-                  <Card className="border-none shadow-lg bg-yellow-50/50">
-                    <CardHeader>
-                      <CardTitle className="text-yellow-900">Optimization Suggestions</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
-                        <h4 className="font-medium text-gray-900 mb-2">Recommended to Keep:</h4>
-                        <div className="space-y-1">
-                          {tripData.optimization.keep?.map((item, i) => (
-                            <div key={i} className="text-sm text-gray-700">✓ {item}</div>
-                          ))}
+                {tripData.optimization &&
+                  tripData.total_weight >
+                    tripData.airline_limit && (
+                    <Card className="border-none shadow-lg bg-yellow-50/50">
+                      <CardHeader>
+                        <CardTitle className="text-yellow-900">
+                          Optimization Suggestions
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div>
+                          <h4 className="font-medium text-gray-900 mb-2">
+                            Recommended to Keep:
+                          </h4>
+                          <div className="space-y-1">
+                            {tripData.optimization.keep?.map(
+                              (item, i) => (
+                                <div
+                                  key={i}
+                                  className="text-sm text-gray-700"
+                                >
+                                  ✓ {item}
+                                </div>
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <h4 className="font-medium text-gray-900 mb-2">Consider Removing:</h4>
-                        <div className="space-y-1">
-                          {tripData.optimization.drop?.map((item, i) => (
-                            <div key={i} className="text-sm text-gray-700">× {item}</div>
-                          ))}
+                        <div>
+                          <h4 className="font-medium text-gray-900 mb-2">
+                            Consider Removing:
+                          </h4>
+                          <div className="space-y-1">
+                            {tripData.optimization.drop?.map(
+                              (item, i) => (
+                                <div
+                                  key={i}
+                                  className="text-sm text-gray-700"
+                                >
+                                  × {item}
+                                </div>
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
+                      </CardContent>
+                    </Card>
+                  )}
               </>
             )}
           </div>
         )}
 
-        {/* Step 5: Packing Strategy */}
+        {/* STEP 5: PACKING STRATEGY */}
         {currentStep === 5 && (
           <div className="space-y-6">
             {loading ? (
               <Card className="border-none shadow-lg">
                 <CardContent className="py-16 text-center">
                   <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-                  <p className="text-gray-600">Generating packing strategy...</p>
+                  <p className="text-gray-600">
+                    Generating packing strategy...
+                  </p>
                 </CardContent>
               </Card>
             ) : tripData.packing_steps.length > 0 ? (
@@ -469,7 +696,9 @@ export default function NewTrip() {
                     <CardTitle>Your Packing Strategy</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-gray-600">Follow these steps for optimal packing:</p>
+                    <p className="text-gray-600">
+                      Follow these steps for optimal packing:
+                    </p>
                   </CardContent>
                 </Card>
 
@@ -481,8 +710,12 @@ export default function NewTrip() {
                           {i + 1}
                         </div>
                         <div>
-                          <h3 className="font-semibold text-lg mb-2 text-gray-900">{step.title}</h3>
-                          <p className="text-gray-600">{step.body}</p>
+                          <h3 className="font-semibold text-lg mb-2 text-gray-900">
+                            {step.title}
+                          </h3>
+                          <p className="text-gray-600">
+                            {step.body}
+                          </p>
                         </div>
                       </div>
                     </CardContent>
@@ -493,7 +726,7 @@ export default function NewTrip() {
           </div>
         )}
 
-        {/* Navigation */}
+        {/* STEP NAVIGATION */}
         <div className="flex gap-4 mt-8">
           {currentStep > 1 && (
             <Button
@@ -506,6 +739,7 @@ export default function NewTrip() {
               Back
             </Button>
           )}
+
           <Button
             onClick={handleNext}
             disabled={loading}
