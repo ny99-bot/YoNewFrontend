@@ -17,6 +17,27 @@ export function getUid() {
 }
 
 /* --------------------------------------------------
+   Small fetch helper with basic retries (network flakes)
+-------------------------------------------------- */
+async function postJSON(url, body, { retries = 1 } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await new Promise(r => setTimeout(r, 600 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/* --------------------------------------------------
    List trips
    GET /trips/list?uid=...
    Returns an array of trips.
@@ -47,12 +68,14 @@ export async function fetchTripDetails(uid, tripId) {
      { destination, purpose, airline, travelClass, suggestions: [{id,text,category,reason,selected}, ...] }
 -------------------------------------------------- */
 export async function getAiSuggestions({ destination, dates, airline, travelClass, purpose, items }) {
-  const res = await fetch(`${API_BASE}/gemini/suggest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ destination, dates, airline, travelClass, purpose, items }),
+  const json = await postJSON(`${API_BASE}/gemini/suggest`, {
+    destination,
+    dates,
+    airline,
+    travelClass,
+    purpose,
+    items,
   });
-  const json = await res.json();
   return json?.data || { suggestions: [] };
 }
 
@@ -62,12 +85,7 @@ export async function getAiSuggestions({ destination, dates, airline, travelClas
    Returns: { items: [{ ...item, aiWeight }], totalG }
 -------------------------------------------------- */
 export async function getWeights({ items }) {
-  const res = await fetch(`${API_BASE}/gemini/weight`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items }),
-  });
-  const json = await res.json();
+  const json = await postJSON(`${API_BASE}/gemini/weight`, { items });
   return json?.data || { items: [], totalG: 0 };
 }
 
@@ -77,12 +95,7 @@ export async function getWeights({ items }) {
    Returns: { keep: [...items], drop: [...items], totalG, limitG }
 -------------------------------------------------- */
 export async function optimizeItems({ items, limitKg }) {
-  const res = await fetch(`${API_BASE}/gemini/optimize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, limitKg }),
-  });
-  const json = await res.json();
+  const json = await postJSON(`${API_BASE}/gemini/optimize`, { items, limitKg });
   return json?.data || null;
 }
 
@@ -92,12 +105,7 @@ export async function optimizeItems({ items, limitKg }) {
    Returns: { dims:{lengthCm,widthCm,depthCm}, liters }
 -------------------------------------------------- */
 export async function lookupLuggage({ query }) {
-  const res = await fetch(`${API_BASE}/luggage/lookup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
-  });
-  const json = await res.json();
+  const json = await postJSON(`${API_BASE}/luggage/lookup`, { query });
   return json?.data || {};
 }
 
@@ -116,18 +124,13 @@ export async function getPackingSteps({
   suitcaseDims,      // <-- now supported
   luggageType,
 }) {
-  const res = await fetch(`${API_BASE}/gemini/steps`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      items,
-      recommendationsSelected,
-      suitcaseSizeL,
-      suitcaseDims,   // <-- pass to backend
-      luggageType,
-    }),
+  const json = await postJSON(`${API_BASE}/gemini/steps`, {
+    items,
+    recommendationsSelected,
+    suitcaseSizeL,
+    suitcaseDims,     // <-- pass to backend
+    luggageType,
   });
-  const json = await res.json();
   return (
     json?.data || {
       suitcaseSizeL,
@@ -146,12 +149,11 @@ export async function getPackingSteps({
    Returns: { tripId }
 -------------------------------------------------- */
 export async function saveTrip(uid, maybeTripId, tripPayload) {
-  const res = await fetch(`${API_BASE}/trips/save`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uid, tripId: maybeTripId || null, trip: { ...tripPayload } }),
+  const json = await postJSON(`${API_BASE}/trips/save`, {
+    uid,
+    tripId: maybeTripId || null,
+    trip: { ...tripPayload },
   });
-  const json = await res.json();
   return json?.data || {};
 }
 
@@ -162,5 +164,54 @@ export async function saveTrip(uid, maybeTripId, tripPayload) {
    Returns: { count: N }
 -------------------------------------------------- */
 export async function saveTripItems(uid, tripId, itemsArray) {
-  const res = await fetch(`${API_BASE}/trips/items/save`, {_
+  const json = await postJSON(`${API_BASE}/trips/items/save`, {
+    uid,
+    tripId,
+    items: itemsArray,
+  });
+  return json?.data || { count: 0 };
+}
 
+/* --------------------------------------------------
+   Delete a trip
+   POST /trips/delete
+   Body: { uid, tripId }
+   Returns: { ok:true }
+-------------------------------------------------- */
+export async function deleteTrip(uid, tripId) {
+  const json = await postJSON(`${API_BASE}/trips/delete`, { uid, tripId });
+  return json?.ok === true;
+}
+
+/* --------------------------------------------------
+   Health check (useful for wake-up pings)
+   GET /health
+-------------------------------------------------- */
+export async function pingHealth() {
+  const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
+  const json = await res.json();
+  return Boolean(json?.ok);
+}
+
+/* --------------------------------------------------
+   OPTIONAL: Normalize legacy AI response into { tips, strategy }
+   Use this in the UI if your backend returns { ok, data:{ suggestions: [...] } }
+-------------------------------------------------- */
+export function normalizeAiResponse(raw, items = []) {
+  if (Array.isArray(raw?.tips) || Array.isArray(raw?.strategy)) return raw;
+
+  const suggs = raw?.data?.suggestions || raw?.suggestions || [];
+  const tips = suggs.map(s => ({
+    title: s.text || s.id || "Tip",
+    detail: s.reason || s.category || "",
+  }));
+
+  const names = items.map(i => i.name).filter(Boolean).slice(0, 5).join(", ");
+  const strategy = [
+    { title: "Prep & compress", detail: `Use cubes; roll shirts. Pack: ${names || "clothes"}.` },
+    { title: "Layering", detail: "Shoes bottom; clothes middle; toiletries & tech on top." },
+    { title: "Final check", detail: "Weigh bag; verify airline limits and remove extras." },
+  ];
+
+  return { tips, strategy };
+}
