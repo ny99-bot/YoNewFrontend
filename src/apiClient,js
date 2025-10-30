@@ -1,23 +1,41 @@
 // src/apiClient.js
 
-// 🌐 Your deployed backend on Render (override with Vite env if present)
-const API_BASE = import.meta?.env?.VITE_API_BASE || "https://yonewbackend.onrender.com";
+// Resolve API base for BOTH Expo/TestFlight and Vite/Web.
+// Priority: EXPO_PUBLIC_API_BASE (Expo) -> VITE_API_BASE (Vite) -> hardcoded fallback.
+const expoBase =
+  typeof process !== "undefined" &&
+  process.env &&
+  process.env.EXPO_PUBLIC_API_BASE;
+
+const viteBase = typeof import.meta !== "undefined"
+  ? import.meta?.env?.VITE_API_BASE
+  : undefined;
+
+// Final, trailing-slash-free base URL
+const API_BASE = String(expoBase || viteBase || "https://yonewbackend.onrender.com").replace(/\/$/, "");
 
 /* --------------------------------------------------
    UID helper (stable per browser)
-   Keeps existing localStorage key "uid" for backward compatibility.
+   Safe on native (no localStorage crash)
 -------------------------------------------------- */
 export function getUid() {
-  let uid = localStorage.getItem("uid");
-  if (!uid) {
-    uid = "uid_" + Math.random().toString(36).slice(2);
-    localStorage.setItem("uid", uid);
+  try {
+    if (typeof localStorage !== "undefined") {
+      let uid = localStorage.getItem("uid");
+      if (!uid) {
+        uid = "uid_" + Math.random().toString(36).slice(2);
+        localStorage.setItem("uid", uid);
+      }
+      return uid;
+    }
+  } catch {
+    // ignore
   }
-  return uid;
+  return "uid_" + Math.random().toString(36).slice(2);
 }
 
 /* --------------------------------------------------
-   Small fetch helper with basic retries (network flakes)
+   Small fetch helper with proper error surfacing
 -------------------------------------------------- */
 async function postJSON(url, body, { retries = 1 } = {}) {
   let lastErr;
@@ -26,51 +44,68 @@ async function postJSON(url, body, { retries = 1 } = {}) {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(body ?? {}),
       });
-      return await res.json();
+
+      // Try to parse JSON; if it fails, fall back to text
+      const text = await res.text();
+      let json;
+      try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+
+      if (!res.ok) {
+        const msg = (json && (json.error || json.message)) || text || `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      return json;
     } catch (e) {
       lastErr = e;
-      if (i < retries) await new Promise(r => setTimeout(r, 600 * (i + 1)));
+      if (i < retries) {
+        await new Promise(r => setTimeout(r, 600 * (i + 1)));
+      }
     }
   }
   throw lastErr;
 }
 
+async function getJSON(url) {
+  const res = await fetch(url, { method: "GET", cache: "no-store" });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+  if (!res.ok) {
+    const msg = (json && (json.error || json.message)) || text || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return json;
+}
+
 /* --------------------------------------------------
    List trips
    GET /trips/list?uid=...
-   Returns an array of trips.
 -------------------------------------------------- */
 export async function listTrips(uid) {
-  const res = await fetch(`${API_BASE}/trips/list?uid=${encodeURIComponent(uid)}`);
-  const json = await res.json();
+  const json = await getJSON(`${API_BASE}/trips/list?uid=${encodeURIComponent(uid)}`);
   return json?.data?.trips || [];
 }
 
 /* --------------------------------------------------
    Fetch a single trip (with items)
    GET /trips/get?uid=...&tripId=...
-   We return the raw server JSON so the caller (TripSummary)
-   can unwrap either { ok:true, data:{ trip } } or { trip }.
 -------------------------------------------------- */
 export async function fetchTripDetails(uid, tripId) {
-  const res = await fetch(
+  return await getJSON(
     `${API_BASE}/trips/get?uid=${encodeURIComponent(uid)}&tripId=${encodeURIComponent(tripId)}`
   );
-  return await res.json(); // raw; TripSummary handles shape
 }
 
 /* --------------------------------------------------
-   Step 3: AI Suggestions (location-aware)
+   AI Suggestions (location-aware)
    POST /gemini/suggest
-   Returns:
-     { destination, purpose, airline, travelClass, suggestions: [{id,text,category,reason,selected}, ...] }
 -------------------------------------------------- */
 export async function getAiSuggestions({ destination, dates, airline, travelClass, purpose, items }) {
   const json = await postJSON(`${API_BASE}/gemini/suggest`, {
     destination,
-    dates,
+    dates,          // can be {start,end}, ["start","end"], or "YYYY-MM-DD"
     airline,
     travelClass,
     purpose,
@@ -80,9 +115,8 @@ export async function getAiSuggestions({ destination, dates, airline, travelClas
 }
 
 /* --------------------------------------------------
-   Step 4: Weight estimates
+   Weight estimates
    POST /gemini/weight
-   Returns: { items: [{ ...item, aiWeight }], totalG }
 -------------------------------------------------- */
 export async function getWeights({ items }) {
   const json = await postJSON(`${API_BASE}/gemini/weight`, { items });
@@ -90,9 +124,8 @@ export async function getWeights({ items }) {
 }
 
 /* --------------------------------------------------
-   Step 4 (if overweight): Optimize list
+   Optimize list vs. airline limit
    POST /gemini/optimize
-   Returns: { keep: [...items], drop: [...items], totalG, limitG }
 -------------------------------------------------- */
 export async function optimizeItems({ items, limitKg }) {
   const json = await postJSON(`${API_BASE}/gemini/optimize`, { items, limitKg });
@@ -100,35 +133,32 @@ export async function optimizeItems({ items, limitKg }) {
 }
 
 /* --------------------------------------------------
-   NEW: Suitcase lookup (brand/model URL or text)
+   Suitcase lookup (brand/model or URL)
    POST /luggage/lookup
-   Returns: { dims:{lengthCm,widthCm,depthCm}, liters }
 -------------------------------------------------- */
-export async function lookupLuggage({ query }) {
-  const json = await postJSON(`${API_BASE}/luggage/lookup`, { query });
+export async function lookupLuggage({ query, lengthCm, widthCm, depthCm, url }) {
+  const json = await postJSON(`${API_BASE}/luggage/lookup`, {
+    query, url, lengthCm, widthCm, depthCm,
+  });
   return json?.data || {};
 }
 
 /* --------------------------------------------------
-   Step 5: Packing strategy
+   Packing strategy
    POST /gemini/steps
-   Send:
-     { items, recommendationsSelected, suitcaseSizeL, suitcaseDims, luggageType }
-   Returns:
-     { suitcaseSizeL, suitcaseDims, luggageType, orderedPackingList: [...], steps: [...] }
 -------------------------------------------------- */
 export async function getPackingSteps({
   items,
   recommendationsSelected,
   suitcaseSizeL,
-  suitcaseDims,      // <-- now supported
+  suitcaseDims,   // { lengthCm, widthCm, depthCm } optional
   luggageType,
 }) {
   const json = await postJSON(`${API_BASE}/gemini/steps`, {
     items,
     recommendationsSelected,
     suitcaseSizeL,
-    suitcaseDims,     // <-- pass to backend
+    suitcaseDims,
     luggageType,
   });
   return (
@@ -145,8 +175,6 @@ export async function getPackingSteps({
 /* --------------------------------------------------
    Save trip metadata
    POST /trips/save
-   Body: { uid, tripId, trip: {...} }
-   Returns: { tripId }
 -------------------------------------------------- */
 export async function saveTrip(uid, maybeTripId, tripPayload) {
   const json = await postJSON(`${API_BASE}/trips/save`, {
@@ -160,8 +188,6 @@ export async function saveTrip(uid, maybeTripId, tripPayload) {
 /* --------------------------------------------------
    Save trip items (bulk)
    POST /trips/items/save
-   Body: { uid, tripId, items: [...] }
-   Returns: { count: N }
 -------------------------------------------------- */
 export async function saveTripItems(uid, tripId, itemsArray) {
   const json = await postJSON(`${API_BASE}/trips/items/save`, {
@@ -175,8 +201,6 @@ export async function saveTripItems(uid, tripId, itemsArray) {
 /* --------------------------------------------------
    Delete a trip
    POST /trips/delete
-   Body: { uid, tripId }
-   Returns: { ok:true }
 -------------------------------------------------- */
 export async function deleteTrip(uid, tripId) {
   const json = await postJSON(`${API_BASE}/trips/delete`, { uid, tripId });
@@ -184,18 +208,16 @@ export async function deleteTrip(uid, tripId) {
 }
 
 /* --------------------------------------------------
-   Health check (useful for wake-up pings)
+   Health check
    GET /health
 -------------------------------------------------- */
 export async function pingHealth() {
-  const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
-  const json = await res.json();
+  const json = await getJSON(`${API_BASE}/health`);
   return Boolean(json?.ok);
 }
 
 /* --------------------------------------------------
-   OPTIONAL: Normalize legacy AI response into { tips, strategy }
-   Use this in the UI if your backend returns { ok, data:{ suggestions: [...] } }
+   OPTIONAL: normalize AI response for UI
 -------------------------------------------------- */
 export function normalizeAiResponse(raw, items = []) {
   if (Array.isArray(raw?.tips) || Array.isArray(raw?.strategy)) return raw;
